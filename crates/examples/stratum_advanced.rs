@@ -117,9 +117,16 @@ enum ViewMode {
 // ── Sprite loader ─────────────────────────────────────────────────────────────
 
 fn load_sprite(path: &str) -> (Vec<u8>, u32, u32) {
-    let img = image::open(path)
-        .unwrap_or_else(|_| {
-            log::warn!("Sprite '{}' not found — using 1×1 white opaque fallback", path);
+    let asset_bytes: Option<&'static [u8]> = match path {
+        "image.png" => Some(include_bytes!("../../image.png")),
+        "spotlight.png" => Some(include_bytes!("../../spotlight.png")),
+        _ => None,
+    };
+
+    let img = asset_bytes
+        .and_then(|bytes| image::load_from_memory(bytes).ok())
+        .unwrap_or_else(|| {
+            log::warn!("Could not decode embedded '{}', using 1×1 white opaque fallback", path);
             // new_rgba8 zero-initialises pixels (alpha=0). The billboard shader
             // multiplies tex_color.a * instance_alpha — a zero texture alpha
             // causes all billboards to be silently discarded.
