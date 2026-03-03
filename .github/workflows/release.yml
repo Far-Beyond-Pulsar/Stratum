@@ -352,7 +352,7 @@ jobs:
           done <<< "${{ env.CRATES_WITH_EXAMPLES }}"
           
           echo "Building examples with args: $ARGS"
-          cargo build $ARGS
+          cargo build $ARGS --examples
         env:
           RUST_BACKTRACE: 1
 
@@ -360,7 +360,7 @@ jobs:
         if: ${{ env.BUILD_EXAMPLES == 'true' }}
         shell: bash
         run: |
-          BIN_DIR="target/${{ matrix.target }}/release"
+          BIN_DIR="target/${{ matrix.target }}/release/examples"
           ARCHIVE_NAME="examples${{ matrix.asset_name }}.tar.gz"
           
           if [ -d "$BIN_DIR" ]; then
@@ -369,7 +369,7 @@ jobs:
             
             # Find example binaries (handle both with and without .exe extension)
             BINARIES=()
-            for pattern in "render_v2_basic" "render_v2_sky"; do
+            for pattern in "stratum_basic" "stratum_advanced"; do
               if [ -f "$BIN_DIR/$pattern.exe" ]; then
                 BINARIES+=("$pattern.exe")
               elif [ -f "$BIN_DIR/$pattern" ]; then
@@ -380,14 +380,12 @@ jobs:
             if [ ${#BINARIES[@]} -eq 0 ]; then
               echo "⚠️ No example binaries found!"
               echo "Available files in $BIN_DIR:"
-              ls -lh "$BIN_DIR" | grep -E "render_v2"
+              ls -lh "$BIN_DIR"
               exit 1
             fi
             
             echo "Found binaries: ${BINARIES[@]}"
-            cd "$BIN_DIR"
-            tar -czf "../../../$ARCHIVE_NAME" "${BINARIES[@]}"
-            cd - > /dev/null
+            tar -czf "$ARCHIVE_NAME" -C "$BIN_DIR" "${BINARIES[@]}"
             
             if [ -f "$ARCHIVE_NAME" ] && [ -s "$ARCHIVE_NAME" ]; then
               echo "✅ Created archive: $ARCHIVE_NAME"
@@ -551,13 +549,13 @@ jobs:
               echo "Added crate for examples: $crate_name from $crate_path"
             fi
           done <<< "${{ env.CRATES_WITH_EXAMPLES }}"
-          cross build $ARGS
+          cross build $ARGS --examples
 
       - name: Create examples archive
         if: ${{ env.BUILD_EXAMPLES == 'true' }}
         shell: bash
         run: |
-          BIN_DIR="target/${{ matrix.target }}/release"
+          BIN_DIR="target/${{ matrix.target }}/release/examples"
           ARCHIVE_NAME="examples${{ matrix.asset_suffix }}.tar.gz"
           
           if [ -d "$BIN_DIR" ]; then
@@ -566,7 +564,7 @@ jobs:
             
             # Find example binaries (handle both with and without .exe extension)
             BINARIES=()
-            for pattern in "render_v2_basic" "render_v2_sky"; do
+            for pattern in "stratum_basic" "stratum_advanced"; do
               if [ -f "$BIN_DIR/$pattern.exe" ]; then
                 BINARIES+=("$pattern.exe")
               elif [ -f "$BIN_DIR/$pattern" ]; then
@@ -577,14 +575,12 @@ jobs:
             if [ ${#BINARIES[@]} -eq 0 ]; then
               echo "⚠️ No example binaries found!"
               echo "Available files in $BIN_DIR:"
-              ls -lh "$BIN_DIR" | grep -E "render_v2"
+              ls -lh "$BIN_DIR"
               exit 1
             fi
             
             echo "Found binaries: ${BINARIES[@]}"
-            cd "$BIN_DIR"
-            tar -czf "../../../$ARCHIVE_NAME" "${BINARIES[@]}"
-            cd - > /dev/null
+            tar -czf "$ARCHIVE_NAME" -C "$BIN_DIR" "${BINARIES[@]}"
             
             if [ -f "$ARCHIVE_NAME" ] && [ -s "$ARCHIVE_NAME" ]; then
               echo "✅ Created archive: $ARCHIVE_NAME"

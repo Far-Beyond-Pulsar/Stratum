@@ -513,10 +513,10 @@ helio-render-v2 = { path = "../../Helio/crates/helio-render-v2" }
 cargo build --workspace
 
 # Basic demo
-cargo run -p examples --bin stratum_basic
+cargo run -p examples --example stratum_basic
 
 # Advanced 4-zone streaming demo
-cargo run -p examples --bin stratum_advanced
+cargo run -p examples --example stratum_advanced
 
 # Tests
 cargo test --workspace
@@ -924,10 +924,10 @@ stratum.register_camera(StratumCamera {
 cargo build --workspace
 
 # Basic demo  (requires Vulkan / DX12 with ray-tracing)
-cargo run -p examples --bin stratum_basic
+cargo run -p examples --example stratum_basic
 
 # Advanced demo — 4-zone streaming world
-cargo run -p examples --bin stratum_advanced
+cargo run -p examples --example stratum_advanced
 
 # Tests
 cargo test --workspace

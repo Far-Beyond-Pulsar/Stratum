@@ -3,11 +3,11 @@ name    = "examples"
 version = "0.1.0"
 edition = "2021"
 
-[[bin]]
+[[example]]
 name = "stratum_basic"
 path = "stratum_basic.rs"
 
-[[bin]]
+[[example]]
 name = "stratum_advanced"
 path = "stratum_advanced.rs"
 
