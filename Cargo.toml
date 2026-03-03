@@ -20,7 +20,7 @@ thiserror   = "1.0"
 wgpu = { git = "https://github.com/Far-Beyond-Pulsar/wgpu", rev = "fce5b80e8017304449124b12637ec324417e40c8" }
 
 # Helio renderer — path relative to this workspace root.
-helio-render-v2 = { path = "../../Helio/crates/helio-render-v2" }
+helio-render-v2 = { git = "https://github.com/Far-Beyond-Pulsar/Helio", rev = "4ce82e32ffd808e41aae011c1d19dea2e670784f" }
 
 # Stratum crates
 stratum       = { path = "crates/stratum" }
