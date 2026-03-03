@@ -229,22 +229,26 @@ impl ApplicationHandler for App {
         level.spawn_entity(
             Components::new()
                 .with_transform(Transform::from_position(Vec3::new( 0.0, 0.5,  0.0)))
-                .with_mesh(h_cube1),
+                .with_mesh(h_cube1)
+                .with_bounding_radius(0.5 * f32::sqrt(3.0)),
         );
         level.spawn_entity(
             Components::new()
                 .with_transform(Transform::from_position(Vec3::new(-2.0, 0.4, -1.0)))
-                .with_mesh(h_cube2),
+                .with_mesh(h_cube2)
+                .with_bounding_radius(0.4 * f32::sqrt(3.0)),
         );
         level.spawn_entity(
             Components::new()
                 .with_transform(Transform::from_position(Vec3::new( 2.0, 0.3,  0.5)))
-                .with_mesh(h_cube3),
+                .with_mesh(h_cube3)
+                .with_bounding_radius(0.3 * f32::sqrt(3.0)),
         );
         level.spawn_entity(
             Components::new()
                 .with_transform(Transform::from_position(Vec3::new(0.0, 0.0, 0.0)))
-                .with_mesh(h_ground),
+                .with_mesh(h_ground)
+                .with_bounding_radius(5.0 * f32::sqrt(2.0)), // half_extent=5, plane diagonal
         );
 
         // Spawn point lights (matched to render_v2_basic positions)

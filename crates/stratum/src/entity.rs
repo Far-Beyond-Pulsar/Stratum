@@ -101,33 +101,76 @@ impl LightData {
     }
 }
 
+/// Camera-facing billboard sprite attached to an entity.
+///
+/// Renders a screen-aligned quad at the entity's world position. Useful for
+/// light halos, particles, editor icons, and any effect that should always
+/// face the viewer.
+///
+/// Stratum carries pure data here (no GPU handle). The `stratum-helio`
+/// integration crate translates this to a `BillboardInstance` for Helio.
+#[derive(Debug, Clone)]
+pub struct BillboardData {
+    /// Width and height of the quad in world-space metres.
+    pub size:         [f32; 2],
+    /// RGBA linear-colour tint multiplied with the billboard sprite texture.
+    pub color:        [f32; 4],
+    /// When `true` the size stays constant in screen space regardless of depth.
+    pub screen_scale: bool,
+}
+
+impl BillboardData {
+    pub fn new(width: f32, height: f32, color: [f32; 4]) -> Self {
+        Self { size: [width, height], color, screen_scale: false }
+    }
+
+    pub fn with_screen_scale(mut self) -> Self {
+        self.screen_scale = true;
+        self
+    }
+}
+
 /// All components an entity may carry.
 ///
 /// All fields are optional. Stratum processes only the components that are
 /// present — absent components cost nothing.
 #[derive(Debug, Clone, Default)]
 pub struct Components {
-    pub transform: Option<Transform>,
-    pub mesh:      Option<MeshHandle>,
-    pub light:     Option<LightData>,
+    pub transform:       Option<Transform>,
+    pub mesh:            Option<MeshHandle>,
+    pub light:           Option<LightData>,
+    /// Camera-facing billboard rendered at the entity's world position.
+    pub billboard:       Option<BillboardData>,
+    /// Radius (metres) of the bounding sphere centred at `transform.position`.
+    ///
+    /// Used by frustum culling to avoid discarding large objects whose
+    /// centre happens to be just outside the frustum planes.
+    ///
+    /// * Cube with half-size `h`       → `h * f32::sqrt(3.0)` (≈ h × 1.73)
+    /// * Plane with half-extent `e`    → `e * f32::sqrt(2.0)` (≈ e × 1.41)
+    /// * Light-only entity             → leave at `0.0`; light range is used.
+    /// * Unset (`0.0`)                 → 50 m conservative fallback.
+    pub bounding_radius: f32,
     /// Arbitrary string tags for runtime queries (e.g., "player", "static").
-    pub tags:      Vec<String>,
+    pub tags:            Vec<String>,
 }
 
 impl Components {
     pub fn new() -> Self { Self::default() }
 
-    pub fn with_transform(mut self, t: Transform) -> Self { self.transform = Some(t); self }
-    pub fn with_mesh     (mut self, h: MeshHandle) -> Self { self.mesh      = Some(h); self }
-    pub fn with_light    (mut self, l: LightData)  -> Self { self.light     = Some(l); self }
-    pub fn with_tag      (mut self, tag: impl Into<String>) -> Self {
+    pub fn with_transform     (mut self, t: Transform)     -> Self { self.transform       = Some(t); self }
+    pub fn with_mesh          (mut self, h: MeshHandle)    -> Self { self.mesh             = Some(h); self }
+    pub fn with_light         (mut self, l: LightData)     -> Self { self.light            = Some(l); self }
+    pub fn with_billboard     (mut self, b: BillboardData) -> Self { self.billboard        = Some(b); self }
+    pub fn with_bounding_radius(mut self, r: f32)          -> Self { self.bounding_radius  = r;       self }
+    pub fn with_tag(mut self, tag: impl Into<String>) -> Self {
         self.tags.push(tag.into()); self
     }
 
     /// Returns `true` if this entity contributes anything to a render view.
     #[inline]
     pub fn is_renderable(&self) -> bool {
-        self.mesh.is_some() || self.light.is_some()
+        self.mesh.is_some() || self.light.is_some() || self.billboard.is_some()
     }
 }
 

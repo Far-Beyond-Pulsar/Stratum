@@ -121,13 +121,20 @@ pub fn visibility_cull(
                 return true;
             }
 
-            // Use light range as the bounding radius; fall back to 10 m for meshes
-            // (conservative — avoids culling large ground planes or tall objects).
-            let radius = components
-                .light
+            // Effective bounding sphere radius:
+            //  - mesh extent  → components.bounding_radius (set by caller from geometry)
+            //  - light range  → light's own bounding_radius()
+            //  - fallback     → 50 m if neither is provided (conservative)
+            let mesh_radius  = components.bounding_radius;
+            let light_radius = components.light
                 .as_ref()
                 .map(|l| l.bounding_radius())
-                .unwrap_or(10.0);
+                .unwrap_or(0.0);
+            let radius = if mesh_radius > 0.0 || light_radius > 0.0 {
+                mesh_radius.max(light_radius)
+            } else {
+                50.0 // generous fallback for entities with unspecified bounds
+            };
 
             frustum.intersects_sphere(transform.position, radius)
         })

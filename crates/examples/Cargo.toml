@@ -7,6 +7,10 @@ edition = "2021"
 name = "stratum_basic"
 path = "stratum_basic.rs"
 
+[[bin]]
+name = "stratum_advanced"
+path = "stratum_advanced.rs"
+
 [dependencies]
 stratum         = { workspace = true }
 stratum-helio   = { workspace = true }

@@ -5,6 +5,7 @@
 
 use stratum::{RenderView, EntityStore, LightData};
 use helio_render_v2::{Camera, Scene, SceneLight};
+use helio_render_v2::features::BillboardInstance;
 use crate::asset_registry::AssetRegistry;
 
 // ── Camera ────────────────────────────────────────────────────────────────────
@@ -61,6 +62,19 @@ pub fn render_view_to_scene(
                 transform.position.to_array(),
             );
             scene = scene.add_light(scene_light);
+        }
+
+        // ── Billboard ─────────────────────────────────────────────────────────
+        if let (Some(billboard), Some(transform)) =
+            (&components.billboard, &components.transform)
+        {
+            let bb = BillboardInstance::new(
+                transform.position.to_array(),
+                billboard.size,
+            )
+            .with_color(billboard.color)
+            .with_screen_scale(billboard.screen_scale);
+            scene = scene.add_billboard(bb);
         }
     }
 
