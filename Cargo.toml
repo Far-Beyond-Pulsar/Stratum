@@ -1,0 +1,27 @@
+[workspace]
+members = [
+    "crates/stratum",
+    "crates/stratum-helio",
+    "crates/examples",
+]
+resolver = "2"
+
+[workspace.dependencies]
+glam        = { version = "0.29", features = ["bytemuck"] }
+log         = "0.4"
+env_logger  = "0.11"
+winit       = "0.30.12"
+pollster    = "0.3"
+bytemuck    = { version = "1", features = ["derive"] }
+image       = { version = "0.25", default-features = false, features = ["png"] }
+thiserror   = "1.0"
+
+# Same wgpu fork used by Helio — types must match exactly.
+wgpu = { git = "https://github.com/Far-Beyond-Pulsar/wgpu", rev = "fce5b80e8017304449124b12637ec324417e40c8" }
+
+# Helio renderer — path relative to this workspace root.
+helio-render-v2 = { path = "../../Helio/crates/helio-render-v2" }
+
+# Stratum crates
+stratum       = { path = "crates/stratum" }
+stratum-helio = { path = "crates/stratum-helio" }

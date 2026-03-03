@@ -1,0 +1,13 @@
+[package]
+name        = "stratum-helio"
+version     = "0.1.0"
+edition     = "2021"
+description = "Integration bridge between Stratum (world layer) and Helio (renderer)."
+
+[dependencies]
+stratum         = { workspace = true }
+helio-render-v2 = { workspace = true }
+# wgpu must use the exact same fork+rev as helio-render-v2 to avoid type mismatches.
+wgpu            = { workspace = true }
+glam            = { workspace = true }
+log             = { workspace = true }

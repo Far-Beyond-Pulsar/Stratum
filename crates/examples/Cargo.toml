@@ -1,0 +1,21 @@
+[package]
+name    = "examples"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "stratum_basic"
+path = "stratum_basic.rs"
+
+[dependencies]
+stratum         = { workspace = true }
+stratum-helio   = { workspace = true }
+helio-render-v2 = { workspace = true }
+wgpu            = { workspace = true }
+glam            = { workspace = true }
+winit           = { workspace = true }
+env_logger      = { workspace = true }
+log             = { workspace = true }
+pollster        = { workspace = true }
+image           = { workspace = true }
+bytemuck        = { workspace = true }
