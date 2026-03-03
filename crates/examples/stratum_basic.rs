@@ -56,8 +56,12 @@ use stratum_helio::{AssetRegistry, HelioIntegration};
 fn load_sprite(path: &str) -> (Vec<u8>, u32, u32) {
     let img = image::open(path)
         .unwrap_or_else(|_| {
-            log::warn!("Could not load '{}', using 1×1 white fallback", path);
-            image::DynamicImage::new_rgba8(1, 1)
+            log::warn!("Could not load '{}', using 1×1 white opaque fallback", path);
+            // new_rgba8 zero-initialises (alpha=0 → billboards would be discarded).
+            // Use a fully-opaque white pixel so colour tints render correctly.
+            let mut px = image::RgbaImage::new(1, 1);
+            px.put_pixel(0, 0, image::Rgba([255, 255, 255, 255]));
+            image::DynamicImage::ImageRgba8(px)
         })
         .into_rgba8();
     let (w, h) = img.dimensions();

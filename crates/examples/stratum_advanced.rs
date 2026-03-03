@@ -117,8 +117,14 @@ enum ViewMode {
 fn load_sprite(path: &str) -> (Vec<u8>, u32, u32) {
     let img = image::open(path)
         .unwrap_or_else(|_| {
-            log::warn!("Sprite '{}' not found — using 1×1 white fallback", path);
-            image::DynamicImage::new_rgba8(1, 1)
+            log::warn!("Sprite '{}' not found — using 1×1 white opaque fallback", path);
+            // new_rgba8 zero-initialises pixels (alpha=0). The billboard shader
+            // multiplies tex_color.a * instance_alpha — a zero texture alpha
+            // causes all billboards to be silently discarded.
+            // Always use a fully-opaque white pixel so colour tints show correctly.
+            let mut px = image::RgbaImage::new(1, 1);
+            px.put_pixel(0, 0, image::Rgba([255, 255, 255, 255]));
+            image::DynamicImage::ImageRgba8(px)
         })
         .into_rgba8();
     let (w, h) = img.dimensions();

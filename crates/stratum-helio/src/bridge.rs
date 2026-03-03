@@ -30,8 +30,7 @@ pub fn render_view_to_scene(
     store:  &EntityStore,
     assets: &AssetRegistry,
 ) -> Scene {
-    // Low ambient ensures geometry is visible even without dynamic lights.
-    let mut scene = Scene::new().with_ambient([0.04, 0.04, 0.04], 0.25);
+    let mut scene = Scene::new();
 
     log::debug!(
         "render_view_to_scene: {} visible entities",
@@ -78,13 +77,13 @@ pub fn render_view_to_scene(
         }
     }
 
-        log::debug!(
-            "render_view_to_scene: {} objects {} lights in scene",
-            scene.objects.len(),
-            scene.lights.len()
-        );
+    log::debug!(
+        "render_view_to_scene: {} objects {} lights in scene",
+        scene.objects.len(),
+        scene.lights.len()
+    );
 
-        scene
+    scene
 }
 
 // ── Light conversion ──────────────────────────────────────────────────────────
