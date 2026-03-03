@@ -57,8 +57,8 @@ use stratum_helio::{AssetRegistry, HelioIntegration};
 
 fn load_sprite(path: &str) -> (Vec<u8>, u32, u32) {
     let asset_bytes: Option<&'static [u8]> = match path {
-        "image.png" => Some(include_bytes!("../../image.png")),
-        "spotlight.png" => Some(include_bytes!("../../spotlight.png")),
+        "image.png" => Some(include_bytes!("../../assets/image.png")),
+        "spotlight.png" => Some(include_bytes!("../../assets/spotlight.png")),
         _ => None,
     };
 
