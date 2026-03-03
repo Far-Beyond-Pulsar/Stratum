@@ -43,9 +43,10 @@ use helio_render_v2::{
         RadianceCascadesFeature,
     },
 };
+use stratum_helio::{Material, TextureData};
 
 use stratum::{
-    CameraId, CameraKind, Components, LightData,
+    CameraId, CameraKind, Components, LightData, MaterialHandle,
     Projection, RenderTargetHandle, SimulationMode,
     Stratum, StratumCamera, Transform, Viewport,
 };
@@ -520,7 +521,17 @@ impl ApplicationHandler for App {
         let h_cube3  = assets.add(GpuMesh::cube (&device, [ 2.0, 0.3,  0.5], 0.3));
         let h_ground = assets.add(GpuMesh::plane(&device, [ 0.0, 0.0,  0.0], 5.0));
 
-        let integration = HelioIntegration::new(renderer, assets);
+        // ── PBR cube material: image.png as base-colour texture ───────────────
+        let (cube_tex_rgba, cube_tex_w, cube_tex_h) = load_sprite("image.png");
+        let cube_material_desc = Material::new()
+            .with_roughness(0.45)
+            .with_metallic(0.0)
+            .with_base_color_texture(TextureData::new(cube_tex_rgba, cube_tex_w, cube_tex_h));
+
+        let mut integration = HelioIntegration::new(renderer, assets);
+
+        let gpu_cube_mat = integration.create_material(&cube_material_desc);
+        let h_cube_mat: MaterialHandle = integration.assets_mut().add_material(gpu_cube_mat);
 
         // ── Stratum world setup ───────────────────────────────────────────────
         //
@@ -538,18 +549,21 @@ impl ApplicationHandler for App {
             Components::new()
                 .with_transform(Transform::from_position(Vec3::new( 0.0, 0.5,  0.0)))
                 .with_mesh(h_cube1)
+                .with_material(h_cube_mat)
                 .with_bounding_radius(0.5 * f32::sqrt(3.0)),
         );
         level.spawn_entity(
             Components::new()
                 .with_transform(Transform::from_position(Vec3::new(-2.0, 0.4, -1.0)))
                 .with_mesh(h_cube2)
+                .with_material(h_cube_mat)
                 .with_bounding_radius(0.4 * f32::sqrt(3.0)),
         );
         level.spawn_entity(
             Components::new()
                 .with_transform(Transform::from_position(Vec3::new( 2.0, 0.3,  0.5)))
                 .with_mesh(h_cube3)
+                .with_material(h_cube_mat)
                 .with_bounding_radius(0.3 * f32::sqrt(3.0)),
         );
         level.spawn_entity(

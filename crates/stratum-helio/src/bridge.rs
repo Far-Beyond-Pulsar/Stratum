@@ -43,7 +43,23 @@ pub fn render_view_to_scene(
         // ── Mesh ──────────────────────────────────────────────────────────────
         if let Some(mesh_handle) = components.mesh {
             if let Some(gpu_mesh) = assets.get(mesh_handle) {
-                scene = scene.add_object(gpu_mesh.clone());
+                // Use PBR material bind group when the entity has one registered.
+                if let Some(mat_handle) = components.material {
+                    if let Some(gpu_mat) = assets.get_material(mat_handle) {
+                        scene = scene.add_object_with_material(
+                            gpu_mesh.clone(),
+                            gpu_mat.clone(),
+                        );
+                    } else {
+                        log::warn!(
+                            "Entity {:?} references unregistered MaterialHandle({:?})",
+                            entity_id, mat_handle
+                        );
+                        scene = scene.add_object(gpu_mesh.clone());
+                    }
+                } else {
+                    scene = scene.add_object(gpu_mesh.clone());
+                }
             } else {
                 log::warn!(
                     "Entity {:?} references unregistered MeshHandle({:?})",

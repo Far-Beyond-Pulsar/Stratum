@@ -66,6 +66,13 @@ impl Transform {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct MeshHandle(pub u64);
 
+/// Opaque reference to a GPU material asset.
+///
+/// Stratum never touches GPU resources. The `stratum-helio` integration crate
+/// maintains an `AssetRegistry` that maps `MaterialHandle → GpuMaterial`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MaterialHandle(pub u64);
+
 /// Light source definition attached to an entity.
 #[derive(Debug, Clone)]
 pub enum LightData {
@@ -138,6 +145,11 @@ impl BillboardData {
 pub struct Components {
     pub transform:       Option<Transform>,
     pub mesh:            Option<MeshHandle>,
+    /// Optional PBR material to apply when rendering this mesh.
+    ///
+    /// If `None` and `mesh` is set, the renderer will use the pipeline's
+    /// default material (flat-shaded, unit roughness/metallic).
+    pub material:        Option<MaterialHandle>,
     pub light:           Option<LightData>,
     /// Camera-facing billboard rendered at the entity's world position.
     pub billboard:       Option<BillboardData>,
@@ -159,8 +171,9 @@ impl Components {
     pub fn new() -> Self { Self::default() }
 
     pub fn with_transform     (mut self, t: Transform)     -> Self { self.transform       = Some(t); self }
-    pub fn with_mesh          (mut self, h: MeshHandle)    -> Self { self.mesh             = Some(h); self }
-    pub fn with_light         (mut self, l: LightData)     -> Self { self.light            = Some(l); self }
+    pub fn with_mesh          (mut self, h: MeshHandle)      -> Self { self.mesh             = Some(h); self }
+    pub fn with_material      (mut self, h: MaterialHandle)  -> Self { self.material         = Some(h); self }
+    pub fn with_light         (mut self, l: LightData)       -> Self { self.light            = Some(l); self }
     pub fn with_billboard     (mut self, b: BillboardData) -> Self { self.billboard        = Some(b); self }
     pub fn with_bounding_radius(mut self, r: f32)          -> Self { self.bounding_radius  = r;       self }
     pub fn with_tag(mut self, tag: impl Into<String>) -> Self {

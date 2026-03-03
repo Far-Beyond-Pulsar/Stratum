@@ -60,9 +60,10 @@ use helio_render_v2::{
         RadianceCascadesFeature,
     },
 };
+use stratum_helio::{Material, TextureData};
 
 use stratum::{
-    BillboardData, CameraId, CameraKind, Components, LightData,
+    BillboardData, CameraId, CameraKind, Components, LightData, MaterialHandle,
     Projection, RenderTargetHandle, SimulationMode,
     Stratum, StratumCamera, Transform, Viewport, EntityId,
 };
@@ -531,6 +532,19 @@ impl ApplicationHandler for App {
 
         let integration = HelioIntegration::new(renderer, assets);
 
+        // ── PBR cube material: image.png as base-colour texture ───────────────
+        // All cube meshes across every zone share the same material.
+        // The `load_sprite` fallback (1×1 white pixel) ensures no crash when
+        // image.png is unavailable.
+        let (cube_tex_rgba, cube_tex_w, cube_tex_h) = load_sprite("image.png");
+        let cube_material_desc = Material::new()
+            .with_roughness(0.45)
+            .with_metallic(0.0)
+            .with_base_color_texture(TextureData::new(cube_tex_rgba, cube_tex_w, cube_tex_h));
+
+        let mut integration = integration;
+        let gpu_cube_mat = integration.create_material(&cube_material_desc);
+        let h_cube_mat: MaterialHandle = integration.assets_mut().add_material(gpu_cube_mat);
         // ── Stratum world setup ───────────────────────────────────────────────
         let mut stratum = Stratum::new(SimulationMode::Game);
         let level_id    = stratum.create_level("advanced_world", CHUNK_SIZE, ACTIVATION_RADIUS);
@@ -558,6 +572,7 @@ impl ApplicationHandler for App {
                 Components::new()
                     .with_transform(Transform::from_position(pos))
                     .with_mesh(handle)
+                    .with_material(h_cube_mat)
                     .with_bounding_radius(radius)
                     .with_tag("zone_a"),
             );
@@ -574,6 +589,7 @@ impl ApplicationHandler for App {
                 Components::new()
                     .with_transform(Transform::from_position(pos))
                     .with_mesh(handle)
+                    .with_material(h_cube_mat)
                     .with_bounding_radius(radius)
                     .with_tag("zone_b"),
             );
@@ -591,6 +607,7 @@ impl ApplicationHandler for App {
                 Components::new()
                     .with_transform(Transform::from_position(pos))
                     .with_mesh(handle)
+                    .with_material(h_cube_mat)
                     .with_bounding_radius(radius)
                     .with_tag("zone_c"),
             );
@@ -607,6 +624,7 @@ impl ApplicationHandler for App {
                 Components::new()
                     .with_transform(Transform::from_position(pos))
                     .with_mesh(handle)
+                    .with_material(h_cube_mat)
                     .with_bounding_radius(radius)
                     .with_tag("zone_d"),
             );

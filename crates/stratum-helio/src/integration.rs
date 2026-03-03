@@ -48,6 +48,15 @@ impl HelioIntegration {
     pub fn assets      (&self)     -> &AssetRegistry    { &self.assets }
     pub fn assets_mut  (&mut self) -> &mut AssetRegistry { &mut self.assets }
 
+    // ── Material creation ─────────────────────────────────────────────────────
+
+    /// Create a GPU material from a `helio_render_v2::Material` descriptor and
+    /// return its `GpuMaterial`. The result can be stored in the `AssetRegistry`
+    /// via `assets_mut().add_material(mat)` to obtain a `MaterialHandle`.
+    pub fn create_material(&mut self, material: &helio_render_v2::Material) -> helio_render_v2::GpuMaterial {
+        self.renderer.create_material(material)
+    }
+
     // ── Offscreen texture registry ────────────────────────────────────────────
 
     /// Register a named offscreen `TextureView` as a render target.

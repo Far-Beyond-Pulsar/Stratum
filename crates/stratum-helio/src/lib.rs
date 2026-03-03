@@ -22,3 +22,7 @@ pub mod integration;
 
 pub use asset_registry::AssetRegistry;
 pub use integration::HelioIntegration;
+
+// Re-export Helio PBR types so examples don't need a direct helio_render_v2 dep
+// for material creation.
+pub use helio_render_v2::{Material, GpuMaterial, TextureData};
