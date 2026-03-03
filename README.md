@@ -351,30 +351,6 @@ flowchart TD
     E -->|yes| V
 ```
 
-### Render View Assembly
-
-```mermaid
-sequenceDiagram
-    participant S as Stratum
-    participant P as WorldPartition
-    participant CR as CameraRegistry
-    participant F as Frustum
-    participant RG as RenderGraph
-
-    S->>P: active_entities()
-    P-->>S: Vec&lt;EntityId&gt; candidates
-    S->>CR: iter() filtered by mode
-    loop For each active camera
-        CR-->>RG: StratumCamera
-        RG->>F: from_view_proj(view_proj)
-        RG->>F: visibility_cull(candidates)
-        F-->>RG: Vec&lt;EntityId&gt; visible
-        RG-->>S: RenderView { camera, visible_entities, priority, ... }
-    end
-    S-->>S: sort views by priority
-    S-->>S: Vec&lt;RenderView&gt;
-```
-
 ### Render View
 
 The contract between Stratum and the renderer. Pure data — no GPU handles.
