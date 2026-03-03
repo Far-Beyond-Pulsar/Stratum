@@ -1,6 +1,6 @@
 [package]
 name        = "stratum"
-version     = "0.1.3"
+version     = "0.1.4"
 edition     = "2021"
 description = "World orchestration layer for the Pulsar engine — levels, spatial streaming, cameras, render views."
 
