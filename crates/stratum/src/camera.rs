@@ -143,9 +143,19 @@ impl StratumCamera {
     }
 
     /// Build the view matrix (right-hand, Y-up).
+    ///
+    /// When looking nearly straight up or down the camera's forward axis
+    /// becomes parallel to the world Y-up vector, which degenerates the
+    /// `look_at` computation. In that case Z is used as the screen-space up
+    /// vector instead, keeping the matrix well-defined.
     pub fn view_matrix(&self) -> Mat4 {
         let forward = self.forward();
-        Mat4::look_at_rh(self.position, self.position + forward, Vec3::Y)
+        let up = if forward.dot(Vec3::Y).abs() > 0.999 {
+            Vec3::NEG_Z
+        } else {
+            Vec3::Y
+        };
+        Mat4::look_at_rh(self.position, self.position + forward, up)
     }
 
     /// Build the projection matrix for a given viewport aspect ratio.

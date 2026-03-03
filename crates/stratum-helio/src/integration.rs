@@ -13,8 +13,12 @@
 //!
 //! * `RenderTargetHandle::PrimarySurface` → the `wgpu::TextureView` passed
 //!   in directly by the caller (the swapchain image acquired each frame).
-//! * `OffscreenTexture` / `ViewportSlot` → falls back to primary surface for
-//!   now; a texture pool can be added here without touching Stratum or Helio.
+//! * `RenderTargetHandle::OffscreenTexture(name)` → a `wgpu::TextureView`
+//!   registered via `register_offscreen_view`. Falls back to primary surface
+//!   if the name is unknown.
+//! * `ViewportSlot` → falls back to primary surface.
+
+use std::collections::HashMap;
 
 use stratum::{Level, RenderTargetHandle, RenderView};
 use helio_render_v2::Renderer;
@@ -25,13 +29,16 @@ use crate::bridge::{render_view_to_camera, render_view_to_scene};
 /// Owns the Helio renderer and the mesh asset registry, and drives render
 /// submission for each frame.
 pub struct HelioIntegration {
-    renderer: Renderer,
-    assets:   AssetRegistry,
+    renderer:         Renderer,
+    assets:           AssetRegistry,
+    /// Named offscreen render targets. Populated by the host when
+    /// `RenderTargetHandle::OffscreenTexture` cameras are in use.
+    offscreen_views:  HashMap<String, wgpu::TextureView>,
 }
 
 impl HelioIntegration {
     pub fn new(renderer: Renderer, assets: AssetRegistry) -> Self {
-        Self { renderer, assets }
+        Self { renderer, assets, offscreen_views: HashMap::new() }
     }
 
     // ── Accessors ─────────────────────────────────────────────────────────────
@@ -40,6 +47,21 @@ impl HelioIntegration {
     pub fn renderer_mut(&mut self) -> &mut Renderer     { &mut self.renderer }
     pub fn assets      (&self)     -> &AssetRegistry    { &self.assets }
     pub fn assets_mut  (&mut self) -> &mut AssetRegistry { &mut self.assets }
+
+    // ── Offscreen texture registry ────────────────────────────────────────────
+
+    /// Register a named offscreen `TextureView` as a render target.
+    ///
+    /// Cameras whose `render_target` is `RenderTargetHandle::OffscreenTexture(name)`
+    /// will render to this view. Overwrites any previous registration for `name`.
+    pub fn register_offscreen_view(&mut self, name: impl Into<String>, view: wgpu::TextureView) {
+        self.offscreen_views.insert(name.into(), view);
+    }
+
+    /// Remove a named offscreen view. The contained `TextureView` is dropped.
+    pub fn unregister_offscreen_view(&mut self, name: &str) {
+        self.offscreen_views.remove(name);
+    }
 
     // ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -73,25 +95,35 @@ impl HelioIntegration {
         let store = level.entities();
 
         for view in views {
-            // ── Resolve render target ─────────────────────────────────────────
-            let target = match &view.render_target {
-                RenderTargetHandle::PrimarySurface => primary_surface,
-                other => {
-                    // Extension point: resolve from an offscreen texture pool.
-                    log::warn!(
-                        "Unresolved render target {:?} — routing to primary surface",
-                        other
-                    );
-                    primary_surface
-                }
-            };
-
             // ── Translate to Helio types ──────────────────────────────────────
             let scene  = render_view_to_scene(view, store, &self.assets);
             let camera = render_view_to_camera(view);
 
-            // ── Submit ────────────────────────────────────────────────────────
-            self.renderer.render_scene(&scene, &camera, target, delta_time)?;
+            // ── Resolve render target then submit ─────────────────────────────
+            let result = match &view.render_target {
+                RenderTargetHandle::PrimarySurface => {
+                    self.renderer.render_scene(&scene, &camera, primary_surface, delta_time)
+                }
+                RenderTargetHandle::OffscreenTexture(name) => {
+                    if let Some(offscreen) = self.offscreen_views.get(name.as_str()) {
+                        self.renderer.render_scene(&scene, &camera, offscreen, delta_time)
+                    } else {
+                        log::warn!(
+                            "Unresolved offscreen texture '{}' — routing to primary surface",
+                            name
+                        );
+                        self.renderer.render_scene(&scene, &camera, primary_surface, delta_time)
+                    }
+                }
+                other => {
+                    log::warn!(
+                        "Unresolved render target {:?} — routing to primary surface",
+                        other
+                    );
+                    self.renderer.render_scene(&scene, &camera, primary_surface, delta_time)
+                }
+            };
+            result?;
         }
 
         Ok(())
