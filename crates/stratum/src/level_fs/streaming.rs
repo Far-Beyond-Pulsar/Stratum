@@ -24,6 +24,14 @@ enum Request {
     /// Generate a chunk (data already built on the caller's thread), save it to
     /// disk on the worker thread, then echo the data back as `ChunkReady`.
     GenerateAndLoad { level_dir: PathBuf, coord: ChunkCoord, data: Box<ChunkFile> },
+    /// Run a generator closure on the worker thread, save the result to disk,
+    /// then echo it back as `ChunkReady`.  This keeps terrain generation off
+    /// the main thread entirely.
+    Generate {
+        level_dir: PathBuf,
+        coord:     ChunkCoord,
+        generator: Box<dyn FnOnce(ChunkCoord) -> ChunkFile + Send>,
+    },
     Shutdown,
 }
 
@@ -113,6 +121,20 @@ impl LevelStreamer {
         });
     }
 
+    /// Enqueue a generate-on-worker request.
+    ///
+    /// The `generator` closure runs **on the background worker thread**, keeping
+    /// the main / render thread free.  Once the closure produces a [`ChunkFile`]
+    /// the worker saves it to disk and sends back a [`StreamEvent::ChunkReady`].
+    pub fn request_generate(
+        &self,
+        level_dir: PathBuf,
+        coord:     ChunkCoord,
+        generator: Box<dyn FnOnce(ChunkCoord) -> ChunkFile + Send>,
+    ) {
+        let _ = self.tx.send(Request::Generate { level_dir, coord, generator });
+    }
+
     /// Drain all `StreamEvent`s that have completed since the last call.
     ///
     /// Returns an empty `Vec` if nothing has finished yet.  Intended to be
@@ -159,6 +181,18 @@ fn worker(req_rx: Receiver<Request>, evt_tx: Sender<StreamEvent>) {
                     &level_dir, coord, &data, io::DEFAULT_BUCKET_SIZE,
                 ) {
                     Ok(()) => StreamEvent::ChunkReady { coord, data: *data },
+                    Err(e) => StreamEvent::ChunkError { coord, error: e.to_string() },
+                };
+                if evt_tx.send(event).is_err() {
+                    break;
+                }
+            }
+            Request::Generate { level_dir, coord, generator } => {
+                let data = generator(coord);
+                let event = match io::save_chunk(
+                    &level_dir, coord, &data, io::DEFAULT_BUCKET_SIZE,
+                ) {
+                    Ok(()) => StreamEvent::ChunkReady { coord, data },
                     Err(e) => StreamEvent::ChunkError { coord, error: e.to_string() },
                 };
                 if evt_tx.send(event).is_err() {

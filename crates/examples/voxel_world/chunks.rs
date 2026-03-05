@@ -2,6 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use glam::Vec3;
 use helio_render_v2::{GpuMesh, PackedVertex};
@@ -32,7 +33,7 @@ pub struct VoxelChunkManager {
     pub loaded:    HashMap<ChunkCoord, (Vec<EntityId>, Vec<MeshHandle>)>,
     pub in_flight: HashSet<ChunkCoord>,
     pub pending_ready: Vec<StreamEvent>,
-    lib:           PrefabLibrary,
+    lib:           Arc<PrefabLibrary>,
 }
 
 impl VoxelChunkManager {
@@ -42,7 +43,7 @@ impl VoxelChunkManager {
             loaded:        HashMap::new(),
             in_flight:     HashSet::new(),
             pending_ready: Vec::new(),
-            lib:           PrefabLibrary::new(),
+            lib:           Arc::new(PrefabLibrary::new()),
         }
     }
 
@@ -100,10 +101,11 @@ impl VoxelChunkManager {
             if chunk_on_disk(&self.dir, coord) {
                 streamer.request_chunk(self.dir.clone(), coord);
             } else {
-                streamer.request_generate_and_load(
+                let lib = Arc::clone(&self.lib);
+                streamer.request_generate(
                     self.dir.clone(),
                     coord,
-                    generation::build_chunk_file(coord, &self.lib),
+                    Box::new(move |c| generation::build_chunk_file(c, &lib)),
                 );
             }
         }
