@@ -17,7 +17,7 @@ path = "level_fs.rs"
 
 [[example]]
 name = "voxel_world"
-path = "voxel_world.rs"
+path = "voxel_world/main.rs"
 
 [dependencies]
 stratum         = { workspace = true }
