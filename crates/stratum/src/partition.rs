@@ -173,6 +173,13 @@ impl WorldPartition {
     pub fn active_chunks(&self) -> impl Iterator<Item = &Chunk> {
         self.chunks.values().filter(|c| c.is_active())
     }
+
+    /// Fully remove a chunk entry from the partition (deletes the grid cell).
+    /// Use when the streaming manager has evicted a chunk and the debug overlay
+    /// should no longer show a box for it.
+    pub fn remove_chunk(&mut self, coord: ChunkCoord) {
+        self.chunks.remove(&coord);
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

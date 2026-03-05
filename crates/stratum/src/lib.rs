@@ -66,6 +66,6 @@ pub use render_view::{RenderView, RenderTargetHandle, Viewport};
 pub use visibility::Frustum;
 pub use level_fs::{
     LevelManifest, LevelStreamer, StreamEvent, LevelFsError,
-    save_level, load_manifest, load_chunk, load_sector_index,
-    chunk_to_components, discover_chunk_coords,
+    save_level, save_chunk, load_manifest, load_chunk, load_sector_index,
+    chunk_to_components, chunk_on_disk, discover_chunk_coords,
 };

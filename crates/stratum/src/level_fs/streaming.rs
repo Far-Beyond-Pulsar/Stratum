@@ -21,6 +21,9 @@ use super::io;
 
 enum Request {
     Load { level_dir: PathBuf, coord: ChunkCoord },
+    /// Generate a chunk (data already built on the caller's thread), save it to
+    /// disk on the worker thread, then echo the data back as `ChunkReady`.
+    GenerateAndLoad { level_dir: PathBuf, coord: ChunkCoord, data: Box<ChunkFile> },
     Shutdown,
 }
 
@@ -88,6 +91,28 @@ impl LevelStreamer {
         let _ = self.tx.send(Request::Load { level_dir, coord });
     }
 
+    /// Enqueue a write-then-echo request.
+    ///
+    /// The caller generates the [`ChunkFile`] on its own thread (pure maths,
+    /// no I/O), then passes it here.  The background worker saves it to disk
+    /// and sends back a [`StreamEvent::ChunkReady`] — identical to the path
+    /// followed by [`request_chunk`] for pre-existing chunks.
+    ///
+    /// Designed for infinite / procedural worlds where chunks don't exist on
+    /// disk until they are first visited.
+    pub fn request_generate_and_load(
+        &self,
+        level_dir: PathBuf,
+        coord:     ChunkCoord,
+        data:      ChunkFile,
+    ) {
+        let _ = self.tx.send(Request::GenerateAndLoad {
+            level_dir,
+            coord,
+            data: Box::new(data),
+        });
+    }
+
     /// Drain all `StreamEvent`s that have completed since the last call.
     ///
     /// Returns an empty `Vec` if nothing has finished yet.  Intended to be
@@ -126,6 +151,17 @@ fn worker(req_rx: Receiver<Request>, evt_tx: Sender<StreamEvent>) {
                 };
                 if evt_tx.send(event).is_err() {
                     // Receiver dropped — main thread is shutting down.
+                    break;
+                }
+            }
+            Request::GenerateAndLoad { level_dir, coord, data } => {
+                let event = match io::save_chunk(
+                    &level_dir, coord, &data, io::DEFAULT_BUCKET_SIZE,
+                ) {
+                    Ok(()) => StreamEvent::ChunkReady { coord, data: *data },
+                    Err(e) => StreamEvent::ChunkError { coord, error: e.to_string() },
+                };
+                if evt_tx.send(event).is_err() {
                     break;
                 }
             }

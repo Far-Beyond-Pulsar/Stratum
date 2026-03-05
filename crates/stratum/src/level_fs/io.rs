@@ -179,6 +179,51 @@ pub fn load_sector_index(
     read_json(&sector_index_path(level_dir, sector))
 }
 
+// ── Single-chunk write ────────────────────────────────────────────────────────
+
+/// Returns `true` if the chunk file for `coord` already exists on disk.
+///
+/// Cheap filesystem stat — safe to call every frame per candidate chunk.
+pub fn chunk_on_disk(level_dir: &Path, coord: ChunkCoord) -> bool {
+    chunk_file_path(level_dir, coord).exists()
+}
+
+/// Save (or overwrite) a single chunk to disk and upsert its entry in the
+/// appropriate sector index.
+///
+/// Does **not** update the level manifest; use [`save_level`] when serialising
+/// a complete level for the first time.  This function is for the streaming
+/// write path where chunks are generated lazily on a background thread.
+pub fn save_chunk(
+    level_dir:  &Path,
+    coord:      ChunkCoord,
+    chunk_file: &ChunkFile,
+    bucket_size: i32,
+) -> Result<(), LevelFsError> {
+    fs::create_dir_all(level_dir.join("chunks"))?;
+    write_json(&chunk_file_path(level_dir, coord), chunk_file)?;
+
+    // Upsert the sector index entry for this chunk.
+    let sector   = sector_for(coord, bucket_size);
+    let idx_path = sector_index_path(level_dir, sector);
+    fs::create_dir_all(idx_path.parent().expect("sector path has parent"))?;
+
+    let mut idx: SectorIndex = if idx_path.exists() {
+        read_json(&idx_path)?
+    } else {
+        SectorIndex { version: FORMAT_VERSION, sector, entries: Vec::new() }
+    };
+
+    // Remove stale entry (if re-saving) then insert fresh one.
+    idx.entries.retain(|e| e.coord != [coord.x, coord.y, coord.z]);
+    idx.entries.push(ChunkEntry {
+        coord:        [coord.x, coord.y, coord.z],
+        entity_count: chunk_file.entities.len(),
+    });
+
+    write_json(&idx_path, &idx)
+}
+
 // ── Conversion helpers ────────────────────────────────────────────────────────
 
 /// Deserialise a `ChunkFile` into `(EntityId, Components)` pairs ready to

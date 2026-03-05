@@ -1,22 +1,18 @@
-//! `voxel_world` — Procedurally generated Minecraft-style voxel world.
+//! `voxel_world` — Infinite procedurally-generated Minecraft-style voxel world.
 //!
-//! Uses a simple hash-based heightmap to generate a world of 1 m³ cubes across
-//! a 16×16 chunk grid.  Each column gets a grass-top / dirt body / stone base
-//! stratification based on depth.  The level is saved to
-//! `levels/voxel_world/` via the Stratum level FS and streamed back chunk-by-
-//! chunk before the first rendered frame.
+//! Chunks are generated lazily as the camera moves.  Each Stratum world-
+//! partition chunk maps 1:1 to one on-disk file under `levels/voxel_world/`.
+//!
+//! ## Mesh strategy
+//! A single `GpuMesh` is built per material (grass / dirt / stone) per chunk.
+//! Only exposed faces are emitted — interior faces between two solid blocks are
+//! culled. This keeps draw-call count at ≤ 3 per loaded chunk and vertex count
+//! proportional to surface area rather than volume.
 //!
 //! ## Controls
-//!
-//! | Key            | Action                              |
-//! |----------------|-------------------------------------|
-//! | WASD           | Fly forward / left / back / right   |
-//! | Space / LShift | Fly up / down                       |
-//! | Mouse drag     | Look (click window to grab cursor)  |
-//! | Tab            | Toggle Editor ↔ Game mode           |
-//! | Escape         | Release cursor / exit               |
+//! WASD fly | Space/Shift up/down | Mouse drag look (click to grab) | Tab mode | Esc exit
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -30,21 +26,19 @@ use winit::{
 };
 
 use helio_render_v2::{
-    GpuMesh, Renderer, RendererConfig,
-    features::{
-        BillboardsFeature, BloomFeature, FeatureRegistry,
-        LightingFeature, RadianceCascadesFeature, ShadowsFeature,
-    },
+    GpuMesh, PackedVertex, Renderer, RendererConfig,
+    features::{BloomFeature, FeatureRegistry, LightingFeature, ShadowsFeature},
 };
 
 use stratum::{
-    chunk_to_components, discover_chunk_coords, save_level,
-    CameraId, CameraKind, Components, LevelId,
-    MaterialHandle, MeshHandle, Projection, RenderTargetHandle,
+    chunk_on_disk,
+    CameraId, CameraKind, ChunkCoord, Components, EntityId, LightData,
+    MaterialHandle, Projection, RenderTargetHandle,
     SimulationMode, Stratum, StratumCamera, Transform, Viewport,
-    Level, StreamEvent, LevelStreamer,
+    Level, StreamEvent, LevelStreamer, MeshHandle,
+    level_fs::format::{ChunkFile, EntityRecord, TransformRecord, FORMAT_VERSION},
 };
-use stratum_helio::{AssetRegistry, HelioIntegration, Material, TextureData};
+use stratum_helio::{AssetRegistry, HelioIntegration, Material};
 
 // ── Level directory ───────────────────────────────────────────────────────────
 
@@ -56,170 +50,345 @@ fn level_dir() -> PathBuf {
         .join("voxel_world")
 }
 
-// ── World generation parameters ───────────────────────────────────────────────
+/// Bump this key to wipe stale on-disk chunks after format changes.
+const CACHE_KEY: &str = "voxel_world_v4_chunk16";
 
-/// Size of each Stratum spatial chunk in world units (= voxel metres here).
+// ── World constants ───────────────────────────────────────────────────────────
+
+/// World-space metres per chunk edge.  1 voxel = 1 m so this equals VOXELS_PER_CHUNK.
 const CHUNK_SIZE: f32 = 16.0;
-/// Streaming activation radius — keep 3 chunks around the camera loaded.
-const ACTIVATION_RADIUS: f32 = 48.0;
-/// How many chunk columns to generate in X and Z.
-const WORLD_CHUNKS_X: i32 = 16;
-const WORLD_CHUNKS_Z: i32 = 16;
-/// Voxels per chunk edge (chunk is VOXELS_PER_CHUNK × VOXELS_PER_CHUNK in XZ).
 const VOXELS_PER_CHUNK: i32 = 16;
-/// Minimum terrain height (stone floor).
+const ACTIVATION_RADIUS: f32 = CHUNK_SIZE * 8.0;
+/// Half-side of the square load area in chunk coords.
+const LOAD_RADIUS: i32 = 5;
 const BASE_HEIGHT: i32 = 2;
-/// Maximum additional height from the heightmap.
-const HEIGHT_RANGE: i32 = 12;
+const HEIGHT_RANGE: i32 = 10; // max surface = 12, fits in Y=0 chunk (0..VOXELS_PER_CHUNK)
 
-const CAM_SPEED: f32 = 12.0;
+const CAM_SPEED: f32 = 16.0;
 const LOOK_SENS: f32 = 0.002;
 
-// ── Voxel type ────────────────────────────────────────────────────────────────
+// ── Block type ────────────────────────────────────────────────────────────────
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+/// Block discriminant stored in chunk JSON as `material` field index.
+///   0 = air (not stored), 1 = grass, 2 = dirt, 3 = stone
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 enum Block { Grass, Dirt, Stone }
 
-// ── Procedural heightmap (no external noise dep) ──────────────────────────────
-//
-// Good-enough hash-based noise: mixes x/z with a few prime multiplications,
-// then adds octaves by calling itself at higher frequencies.
+impl Block {
+    fn mat_index(self) -> u64 { match self { Block::Grass => 1, Block::Dirt => 2, Block::Stone => 3 } }
+    fn from_mat_index(n: u64) -> Option<Self> {
+        match n { 1 => Some(Block::Grass), 2 => Some(Block::Dirt), 3 => Some(Block::Stone), _ => None }
+    }
+}
+
+// ── Heightmap (no external dep) ───────────────────────────────────────────────
 
 fn hash(x: i32, z: i32, seed: u64) -> f32 {
     let mut v = (x as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15)
-        ^ (z as u64).wrapping_mul(0x6c62_272e_07bb_0142)
-        ^ seed;
-    v ^= v >> 30;
-    v = v.wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    v ^= v >> 27;
-    v = v.wrapping_mul(0x94d0_49bb_1331_11eb);
+              ^ (z as u64).wrapping_mul(0x6c62_272e_07bb_0142)
+              ^ seed;
+    v ^= v >> 30; v = v.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    v ^= v >> 27; v = v.wrapping_mul(0x94d0_49bb_1331_11eb);
     v ^= v >> 31;
     (v as f32) / (u64::MAX as f32)
 }
 
-fn octave_noise(x: f32, z: f32, seed: u64) -> f32 {
-    let xi = x.floor() as i32;
-    let zi = z.floor() as i32;
-    let fx = x - xi as f32;
-    let fz = z - zi as f32;
-    // Smooth interpolation
-    let ux = fx * fx * (3.0 - 2.0 * fx);
-    let uz = fz * fz * (3.0 - 2.0 * fz);
-    let v00 = hash(xi,     zi,     seed);
-    let v10 = hash(xi + 1, zi,     seed);
-    let v01 = hash(xi,     zi + 1, seed);
-    let v11 = hash(xi + 1, zi + 1, seed);
-    let top = v00 + ux * (v10 - v00);
-    let bot = v01 + ux * (v11 - v01);
-    top + uz * (bot - top)
+fn smooth_noise(x: f32, z: f32, seed: u64) -> f32 {
+    let xi = x.floor() as i32; let zi = z.floor() as i32;
+    let ux = { let f = x - xi as f32; f * f * (3.0 - 2.0 * f) };
+    let uz = { let f = z - zi as f32; f * f * (3.0 - 2.0 * f) };
+    let a = hash(xi, zi, seed);     let b = hash(xi+1, zi,   seed);
+    let c = hash(xi, zi+1, seed);   let d = hash(xi+1, zi+1, seed);
+    (a + ux*(b-a)) + uz * ((c + ux*(d-c)) - (a + ux*(b-a)))
 }
 
 fn terrain_height(wx: i32, wz: i32) -> i32 {
-    let x = wx as f32;
-    let z = wz as f32;
-    // 3 octaves of noise at different scales
-    let n = octave_noise(x / 24.0, z / 24.0, 0)
-          + octave_noise(x / 12.0, z / 12.0, 1) * 0.5
-          + octave_noise(x /  6.0, z /  6.0, 2) * 0.25;
-    let n = n / 1.75; // normalise to ~[0,1]
+    let (x, z) = (wx as f32, wz as f32);
+    let n = smooth_noise(x/20.0, z/20.0, 0)
+          + smooth_noise(x/10.0, z/10.0, 1) * 0.5
+          + smooth_noise(x/5.0,  z/5.0,  2) * 0.25;
+    let n = (n / 1.75).clamp(0.0, 1.0);
     BASE_HEIGHT + (n * HEIGHT_RANGE as f32) as i32
 }
 
-fn block_at(wx: i32, wy: i32, wz: i32) -> Option<Block> {
+fn block_type(wx: i32, wy: i32, wz: i32) -> Block {
     let h = terrain_height(wx, wz);
-    if wy > h       { return None; }
-    if wy == h      { return Some(Block::Grass); }
-    if wy >= h - 3  { return Some(Block::Dirt);  }
-    Some(Block::Stone)
+    if wy == h          { Block::Grass }
+    else if wy >= h - 2 { Block::Dirt  }
+    else                { Block::Stone }
 }
 
-// ── World generation ──────────────────────────────────────────────────────────
+// ── Chunk data generation ─────────────────────────────────────────────────────
+//
+// The ChunkFile stores one EntityRecord per voxel. Each record contains:
+//   - transform.position  → world-space voxel centre
+//   - material            → Block discriminant (1=grass, 2=dirt, 3=stone)
+// Mesh handles are NOT stored — they are built at load time from geometry.
 
-fn generate_world(
-    device:    &wgpu::Device,
-    assets:    &mut AssetRegistry,
-    grass_mat: MaterialHandle,
-    dirt_mat:  MaterialHandle,
-    stone_mat: MaterialHandle,
-) -> PathBuf {
-    // One shared unit-cube mesh per block type.
-    // GpuMesh::cube takes (center_position, half_size) — we use [0,0,0] as
-    // placeholder; actual position comes from the entity Transform.
-    let h_grass = assets.add(GpuMesh::cube(device, [0.0, 0.0, 0.0], 0.5));
-    let h_dirt  = assets.add(GpuMesh::cube(device, [0.0, 0.0, 0.0], 0.5));
-    let h_stone = assets.add(GpuMesh::cube(device, [0.0, 0.0, 0.0], 0.5));
+fn build_chunk_file(coord: ChunkCoord) -> ChunkFile {
+    if coord.y != 0 {
+        return ChunkFile { version: FORMAT_VERSION, coord: [coord.x, coord.y, coord.z], entities: vec![] };
+    }
 
-    let mut level = Level::new(
-        LevelId::new(2),
-        "voxel_world",
-        CHUNK_SIZE,
-        ACTIVATION_RADIUS,
-    );
+    let ox = coord.x * VOXELS_PER_CHUNK;
+    let oz = coord.z * VOXELS_PER_CHUNK;
+    let mut entities = Vec::new();
+    let mut eid: u64 = 0;
 
-    let total_x = WORLD_CHUNKS_X * VOXELS_PER_CHUNK;
-    let total_z = WORLD_CHUNKS_Z * VOXELS_PER_CHUNK;
-    let max_h   = BASE_HEIGHT + HEIGHT_RANGE + 1;
-
-    let mut block_count = 0usize;
-
-    for wx in 0..total_x {
-        for wz in 0..total_z {
-            let h = terrain_height(wx, wz);
-            for wy in 0..=h.min(max_h) {
-                let Some(block) = block_at(wx, wy, wz) else { continue };
-
-                let (mesh, mat) = match block {
-                    Block::Grass => (h_grass, grass_mat),
-                    Block::Dirt  => (h_dirt,  dirt_mat),
-                    Block::Stone => (h_stone, stone_mat),
-                };
-
-                // Centre each 1 m³ cube at (wx+0.5, wy+0.5, wz+0.5).
-                let pos = Vec3::new(wx as f32 + 0.5, wy as f32 + 0.5, wz as f32 + 0.5);
-
-                level.spawn_entity(
-                    Components::new()
-                        .with_transform(Transform::from_position(pos))
-                        .with_mesh(mesh)
-                        .with_material(mat)
-                        .with_bounding_radius(0.5 * f32::sqrt(3.0)),
-                );
-                block_count += 1;
+    for lx in 0..VOXELS_PER_CHUNK {
+        for lz in 0..VOXELS_PER_CHUNK {
+            let wx = ox + lx;
+            let wz = oz + lz;
+            let h  = terrain_height(wx, wz).min(VOXELS_PER_CHUNK - 1);
+            for wy in 0..=h {
+                let block = block_type(wx, wy, wz);
+                eid += 1;
+                entities.push(EntityRecord {
+                    id: eid,
+                    transform: Some(TransformRecord {
+                        position: [wx as f32 + 0.5, wy as f32 + 0.5, wz as f32 + 0.5],
+                        rotation: [0.0, 0.0, 0.0, 1.0],
+                        scale:    [1.0, 1.0, 1.0],
+                    }),
+                    mesh:            None,
+                    material:        Some(block.mat_index()),
+                    light:           None,
+                    billboard:       None,
+                    bounding_radius: 0.866,
+                    tags:            vec![],
+                });
             }
         }
     }
 
-    log::info!(
-        "Generated {} blocks across {}×{} columns",
-        block_count, total_x, total_z
-    );
-
-    // Save to disk.
-    let dir = level_dir();
-    let _ = std::fs::remove_dir_all(&dir);
-    save_level(&level, &dir).expect("save_level failed");
-    log::info!(
-        "Saved voxel level — {} entities, {} chunks → {}",
-        level.entities().len(),
-        level.partition().chunks().count(),
-        dir.display()
-    );
-
-    dir
+    ChunkFile { version: FORMAT_VERSION, coord: [coord.x, coord.y, coord.z], entities }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Load phase
-// ─────────────────────────────────────────────────────────────────────────────
+// ── Chunk mesh builder ────────────────────────────────────────────────────────
+//
+// Given a voxel set (world-space integer positions), build face-culled geometry.
+// Only faces with NO solid neighbour in that direction are emitted.
+// Returns one Vec<(vertices, indices)> per distinct Block type.
 
-enum LoadPhase {
-    Streaming { expected: usize, loaded: usize },
-    Ready,
+fn build_chunk_mesh(
+    device:    &wgpu::Device,
+    chunk:     ChunkFile,
+    mat_grass: MaterialHandle,
+    mat_dirt:  MaterialHandle,
+    mat_stone: MaterialHandle,
+) -> Vec<(GpuMesh, MaterialHandle)> {
+    // Collect solid voxels keyed by their integer min-corner (floor of centre).
+    let mut solid: HashMap<(i32,i32,i32), Block> = HashMap::new();
+    for rec in &chunk.entities {
+        if let (Some(t), Some(m)) = (&rec.transform, rec.material) {
+            if let Some(block) = Block::from_mat_index(m) {
+                solid.insert((
+                    t.position[0].floor() as i32,
+                    t.position[1].floor() as i32,
+                    t.position[2].floor() as i32,
+                ), block);
+            }
+        }
+    }
+    if solid.is_empty() { return vec![]; }
+
+    // Face table derived directly from GpuMesh::cube (same winding / UVs).
+    // Each entry: (normal, neighbour-delta, [4 corner offsets from voxel min])
+    // Winding: CCW when viewed from outside (matches the renderer's convention).
+    #[rustfmt::skip]
+    const FACES: &[([f32;3], [i32;3], [[f32;3];4])] = &[
+        // +Z
+        ([0.,0., 1.], [0,0, 1], [[0.,0.,1.],[1.,0.,1.],[1.,1.,1.],[0.,1.,1.]]),
+        // -Z
+        ([0.,0.,-1.], [0,0,-1], [[1.,0.,0.],[0.,0.,0.],[0.,1.,0.],[1.,1.,0.]]),
+        // +X
+        ([ 1.,0.,0.], [ 1,0,0], [[1.,0.,1.],[1.,0.,0.],[1.,1.,0.],[1.,1.,1.]]),
+        // -X
+        ([-1.,0.,0.], [-1,0,0], [[0.,0.,0.],[0.,0.,1.],[0.,1.,1.],[0.,1.,0.]]),
+        // +Y
+        ([0., 1.,0.], [0, 1,0], [[0.,1.,1.],[1.,1.,1.],[1.,1.,0.],[0.,1.,0.]]),
+        // -Y
+        ([0.,-1.,0.], [0,-1,0], [[0.,0.,0.],[1.,0.,0.],[1.,0.,1.],[0.,0.,1.]]),
+    ];
+    const UVS: [[f32;2]; 4] = [[0.,0.],[1.,0.],[1.,1.],[0.,1.]];
+
+    let mut verts: HashMap<Block, Vec<PackedVertex>> = HashMap::new();
+    let mut idxs:  HashMap<Block, Vec<u32>>          = HashMap::new();
+
+    for (&(bx,by,bz), &block) in &solid {
+        let v  = verts.entry(block).or_default();
+        let ix = idxs.entry(block).or_default();
+
+        for (normal, nb, corners) in FACES {
+            if solid.contains_key(&(bx+nb[0], by+nb[1], bz+nb[2])) { continue; }
+
+            let base_vert = v.len() as u32;
+            // Tangent = direction from corner[0] to corner[1] (matches GpuMesh::cube).
+            let c0 = corners[0]; let c1 = corners[1];
+            let td = [c1[0]-c0[0], c1[1]-c0[1], c1[2]-c0[2]];
+            let tl = (td[0]*td[0] + td[1]*td[1] + td[2]*td[2]).sqrt().max(1e-8);
+            let tangent = [td[0]/tl, td[1]/tl, td[2]/tl];
+
+            for (ci, corner) in corners.iter().enumerate() {
+                v.push(PackedVertex::new_with_tangent(
+                    [bx as f32 + corner[0], by as f32 + corner[1], bz as f32 + corner[2]],
+                    *normal, UVS[ci], tangent,
+                ));
+            }
+            ix.extend_from_slice(&[base_vert, base_vert+1, base_vert+2, base_vert, base_vert+2, base_vert+3]);
+        }
+    }
+
+    let mat_of = |b: Block| match b { Block::Grass => mat_grass, Block::Dirt => mat_dirt, Block::Stone => mat_stone };
+    let mut result = Vec::new();
+    for (block, v) in verts {
+        if v.is_empty() { continue; }
+        let ix = idxs.remove(&block).unwrap_or_default();
+        result.push((GpuMesh::new(device, &v, &ix), mat_of(block)));
+    }
+    result
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// App
-// ─────────────────────────────────────────────────────────────────────────────
+// ── VoxelChunkManager ─────────────────────────────────────────────────────────
+
+/// Max new chunk requests sent to the streamer per frame.
+const MAX_REQUESTS_PER_FRAME: usize = 6;
+/// Max completed chunk events processed (mesh uploads) per frame.
+const MAX_UPLOADS_PER_FRAME: usize = 4;
+
+struct VoxelChunkManager {
+    dir:        PathBuf,
+    /// Chunks resident in the live `Level`: coord → (entity IDs, mesh handles to free).
+    pub loaded: HashMap<ChunkCoord, (Vec<EntityId>, Vec<MeshHandle>)>,
+    in_flight:  HashSet<ChunkCoord>,
+    grass_mat:  MaterialHandle,
+    dirt_mat:   MaterialHandle,
+    stone_mat:  MaterialHandle,
+    pending_ready: Vec<StreamEvent>,
+}
+
+impl VoxelChunkManager {
+    fn new(
+        dir:       PathBuf,
+        grass_mat: MaterialHandle,
+        dirt_mat:  MaterialHandle,
+        stone_mat: MaterialHandle,
+    ) -> Self {
+        Self { dir, grass_mat, dirt_mat, stone_mat, loaded: HashMap::new(), in_flight: HashSet::new(), pending_ready: Vec::new() }
+    }
+
+    fn desired_set(&self, cam: Vec3) -> HashSet<ChunkCoord> {
+        let cx = (cam.x / CHUNK_SIZE).floor() as i32;
+        let cz = (cam.z / CHUNK_SIZE).floor() as i32;
+        let mut set = HashSet::new();
+        for dx in -LOAD_RADIUS..=LOAD_RADIUS {
+            for dz in -LOAD_RADIUS..=LOAD_RADIUS {
+                set.insert(ChunkCoord::new(cx + dx, 0, cz + dz));
+            }
+        }
+        set
+    }
+
+    fn update(&mut self, cam: Vec3, level: &mut Level, streamer: &LevelStreamer, assets: &mut AssetRegistry) {
+        let desired = self.desired_set(cam);
+
+        let evict: Vec<ChunkCoord> = self.loaded.keys()
+            .filter(|c| !desired.contains(c))
+            .copied()
+            .collect();
+        for coord in evict {
+            if let Some((ids, mesh_handles)) = self.loaded.remove(&coord) {
+                for id in ids { level.despawn_entity(id); }
+                for mh in mesh_handles { assets.remove(mh); }
+            }
+            level.partition_mut().remove_chunk(coord);
+        }
+
+        let mut to_request: Vec<ChunkCoord> = desired.into_iter()
+            .filter(|c| !self.loaded.contains_key(c) && !self.in_flight.contains(c))
+            .collect();
+        let cx = cam.x; let cz = cam.z;
+        to_request.sort_unstable_by(|a, b| {
+            let da = (a.x as f32 * CHUNK_SIZE - cx).powi(2) + (a.z as f32 * CHUNK_SIZE - cz).powi(2);
+            let db = (b.x as f32 * CHUNK_SIZE - cx).powi(2) + (b.z as f32 * CHUNK_SIZE - cz).powi(2);
+            da.partial_cmp(&db).unwrap()
+        });
+
+        for coord in to_request.into_iter().take(MAX_REQUESTS_PER_FRAME) {
+            self.in_flight.insert(coord);
+            if chunk_on_disk(&self.dir, coord) {
+                streamer.request_chunk(self.dir.clone(), coord);
+            } else {
+                streamer.request_generate_and_load(self.dir.clone(), coord, build_chunk_file(coord));
+            }
+        }
+    }
+
+    /// Accept newly arrived stream events into the pending queue.
+    fn collect_events(&mut self, new_events: Vec<StreamEvent>) {
+        self.pending_ready.extend(new_events);
+    }
+
+    /// Process up to MAX_UPLOADS_PER_FRAME pending events (GPU mesh uploads).
+    fn flush_events(
+        &mut self,
+        level:  &mut Level,
+        device: &wgpu::Device,
+        assets: &mut AssetRegistry,
+    ) {
+        let take = self.pending_ready.len().min(MAX_UPLOADS_PER_FRAME);
+        for event in self.pending_ready.drain(..take).collect::<Vec<_>>() {
+            match event {
+                StreamEvent::ChunkReady { coord, data } => {
+                    self.in_flight.remove(&coord);
+                    let submeshes = build_chunk_mesh(device, data, self.grass_mat, self.dirt_mat, self.stone_mat);
+                    let cx = coord.x as f32 * CHUNK_SIZE + CHUNK_SIZE * 0.5;
+                    let cz = coord.z as f32 * CHUNK_SIZE + CHUNK_SIZE * 0.5;
+                    let chunk_centre = Vec3::new(cx, CHUNK_SIZE * 0.5, cz);
+
+                    let mut ids = Vec::new();
+                    let mut mesh_handles = Vec::new();
+
+                    for (gpu_mesh, mat) in submeshes {
+                        let mesh_h = assets.add(gpu_mesh);
+                        mesh_handles.push(mesh_h);
+                        ids.push(level.spawn_entity(
+                            Components::new()
+                                .with_transform(Transform::from_position(chunk_centre))
+                                .with_mesh(mesh_h)
+                                .with_material(mat)
+                                .with_bounding_radius(CHUNK_SIZE * 1.5),
+                        ));
+                    }
+
+                    level.partition_mut().get_or_create(coord).activate();
+                    self.loaded.insert(coord, (ids, mesh_handles));
+                }
+                StreamEvent::ChunkError { coord, error } => {
+                    self.in_flight.remove(&coord);
+                    log::warn!("Chunk {:?}: {}", coord, error);
+                }
+            }
+        }
+    }
+}
+
+// ── Cache invalidation ────────────────────────────────────────────────────────
+
+fn ensure_cache_valid(dir: &std::path::Path) {
+    let key_path = dir.join(".cache_key");
+    let current_ok = std::fs::read_to_string(&key_path)
+        .map(|s| s.trim() == CACHE_KEY)
+        .unwrap_or(false);
+    if !current_ok {
+        let _ = std::fs::remove_dir_all(dir);
+        std::fs::create_dir_all(dir).expect("create level dir");
+        std::fs::write(&key_path, CACHE_KEY).expect("write cache key");
+        log::info!("Level cache invalidated — regenerating chunks");
+    }
+}
+
+// ── App ───────────────────────────────────────────────────────────────────────
 
 struct App { state: Option<AppState> }
 impl App { fn new() -> Self { Self { state: None } } }
@@ -230,33 +399,32 @@ struct AppState {
     device:         Arc<wgpu::Device>,
     queue:          Arc<wgpu::Queue>,
     surface_format: wgpu::TextureFormat,
-
     stratum:        Stratum,
     integration:    HelioIntegration,
     main_cam_id:    CameraId,
-
+    chunks:         VoxelChunkManager,
     streamer:       LevelStreamer,
-    load_phase:     LoadPhase,
-
     last_frame:     std::time::Instant,
     keys:           HashSet<KeyCode>,
     cursor_grabbed: bool,
     mouse_delta:    (f32, f32),
     time:           f32,
+    frame_count:    u32,
+    fps_acc:        f32,
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// ApplicationHandler
-// ─────────────────────────────────────────────────────────────────────────────
+// ── ApplicationHandler ────────────────────────────────────────────────────────
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.state.is_some() { return; }
 
+        ensure_cache_valid(&level_dir());
+
         let window = Arc::new(
             event_loop.create_window(
                 Window::default_attributes()
-                    .with_title("Stratum — Voxel World")
+                    .with_title("Stratum — Infinite Voxel World")
                     .with_inner_size(winit::dpi::LogicalSize::new(1280u32, 720u32)),
             ).expect("window"),
         );
@@ -301,22 +469,10 @@ impl ApplicationHandler for App {
             desired_maximum_frame_latency: 2,
         });
 
-        // Renderer — no billboards needed for a pure voxel world, but keep
-        // lighting + shadows so it looks nice.
-        let world_w = (WORLD_CHUNKS_X * VOXELS_PER_CHUNK) as f32;
-        let world_z = (WORLD_CHUNKS_Z * VOXELS_PER_CHUNK) as f32;
-        let world_h = (BASE_HEIGHT + HEIGHT_RANGE + 4) as f32;
-
-        let (sprite_rgba, sw, sh) = load_sprite();
         let features = FeatureRegistry::builder()
             .with_feature(LightingFeature::new())
-            .with_feature(BloomFeature::new().with_intensity(0.2).with_threshold(1.5))
-            .with_feature(ShadowsFeature::new().with_atlas_size(4096).with_max_lights(4))
-            .with_feature(BillboardsFeature::new().with_sprite(sprite_rgba, sw, sh))
-            .with_feature(
-                RadianceCascadesFeature::new()
-                    .with_world_bounds([0.0, -1.0, 0.0], [world_w, world_h, world_z]),
-            )
+            .with_feature(ShadowsFeature::new().with_atlas_size(2048).with_max_lights(4))
+            .with_feature(BloomFeature::new().with_intensity(0.1).with_threshold(2.0))
             .build();
 
         let renderer = Renderer::new(
@@ -326,49 +482,51 @@ impl ApplicationHandler for App {
 
         let mut integration = HelioIntegration::new(renderer, AssetRegistry::new());
 
-        // ── Three block materials ─────────────────────────────────────────────
+        // Three solid-colour PBR materials — one per block type.
+        // Chunk meshes are built at load time; only material handles are stored here.
         let grass_mat = {
-            let gpu = integration.create_material(
-                &Material::new().with_roughness(0.9).with_metallic(0.0)
-                    .with_base_color([0.24, 0.55, 0.16, 1.0]),
+            let g = integration.create_material(
+                &Material::new().with_base_color([0.24, 0.55, 0.16, 1.0]).with_roughness(0.9),
             );
-            integration.assets_mut().add_material(gpu)
+            integration.assets_mut().add_material(g)
         };
         let dirt_mat = {
-            let gpu = integration.create_material(
-                &Material::new().with_roughness(1.0).with_metallic(0.0)
-                    .with_base_color([0.47, 0.30, 0.14, 1.0]),
+            let g = integration.create_material(
+                &Material::new().with_base_color([0.47, 0.30, 0.14, 1.0]).with_roughness(1.0),
             );
-            integration.assets_mut().add_material(gpu)
+            integration.assets_mut().add_material(g)
         };
         let stone_mat = {
-            let gpu = integration.create_material(
-                &Material::new().with_roughness(0.85).with_metallic(0.0)
-                    .with_base_color([0.50, 0.50, 0.50, 1.0]),
+            let g = integration.create_material(
+                &Material::new().with_base_color([0.50, 0.50, 0.50, 1.0]).with_roughness(0.85),
             );
-            integration.assets_mut().add_material(gpu)
+            integration.assets_mut().add_material(g)
         };
 
-        // ── Generate and save world ───────────────────────────────────────────
-        log::info!("Generating voxel world ({}×{} chunk columns) …",
-            WORLD_CHUNKS_X, WORLD_CHUNKS_Z);
-        let dir = generate_world(
-            &device, integration.assets_mut(),
-            grass_mat, dirt_mat, stone_mat,
-        );
-
-        // ── Empty Stratum world — stream entities in from disk ────────────────
-        let mut stratum = Stratum::new(SimulationMode::Editor);
-        let level_id    = stratum.create_level("voxel_world", CHUNK_SIZE, ACTIVATION_RADIUS);
+        // Stratum world — empty, chunks stream in each frame.
+        let mut stratum  = Stratum::new(SimulationMode::Editor);
+        let level_id     = stratum.create_level("voxel_world", CHUNK_SIZE, ACTIVATION_RADIUS);
         stratum.level_mut(level_id).unwrap().activate_all_chunks();
 
-        // ── Camera — start above the centre of the world, looking down ────────
-        let cx = (WORLD_CHUNKS_X * VOXELS_PER_CHUNK) as f32 * 0.5;
-        let cz = (WORLD_CHUNKS_Z * VOXELS_PER_CHUNK) as f32 * 0.5;
+        // Single directional sun light.
+        {
+            let level = stratum.level_mut(level_id).unwrap();
+            level.spawn_entity(
+                Components::new()
+                    .with_transform(Transform::from_position(Vec3::new(0.0, 100.0, 0.0)))
+                    .with_light(LightData::Directional {
+                        direction: Vec3::new(-0.4, -1.0, -0.3).normalize().to_array(),
+                        color:     [1.0, 0.97, 0.88],
+                        intensity: 8.0,
+                    }),
+            );
+        }
+
+        // Camera — start elevated, looking at terrain.
         let main_cam_id = stratum.register_camera(StratumCamera {
             id:            CameraId::PLACEHOLDER,
             kind:          CameraKind::EditorPerspective,
-            position:      Vec3::new(cx, world_h + 8.0, cz + 30.0),
+            position:      Vec3::new(4.0, 14.0, -12.0),
             yaw:           0.0,
             pitch:         -0.35,
             projection:    Projection::perspective(std::f32::consts::FRAC_PI_3, 0.1, 1000.0),
@@ -378,25 +536,22 @@ impl ApplicationHandler for App {
             active:        true,
         });
 
-        // ── Stream chunks from disk ───────────────────────────────────────────
         let streamer = LevelStreamer::new();
-        let coords   = discover_chunk_coords(&dir).expect("discover_chunk_coords");
-        let expected = coords.len();
-        log::info!("Streaming {} chunks …", expected);
-        for coord in coords {
-            streamer.request_chunk(dir.clone(), coord);
-        }
+        let chunks   = VoxelChunkManager::new(
+            level_dir(), grass_mat, dirt_mat, stone_mat,
+        );
 
         self.state = Some(AppState {
             window, surface, device, queue, surface_format: fmt,
             stratum, integration, main_cam_id,
-            streamer,
-            load_phase: LoadPhase::Streaming { expected, loaded: 0 },
+            chunks, streamer,
             last_frame:     std::time::Instant::now(),
             keys:           HashSet::new(),
             cursor_grabbed: false,
             mouse_delta:    (0.0, 0.0),
             time:           0.0,
+            frame_count:    0,
+            fps_acc:        0.0,
         });
     }
 
@@ -405,7 +560,6 @@ impl ApplicationHandler for App {
         _id: WindowId, event: WindowEvent,
     ) {
         let Some(state) = &mut self.state else { return };
-
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
 
@@ -497,67 +651,70 @@ impl ApplicationHandler for App {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Per-frame render
-// ─────────────────────────────────────────────────────────────────────────────
+// ── Per-frame logic ───────────────────────────────────────────────────────────
 
 impl AppState {
     fn render(&mut self, dt: f32) {
-        self.time += dt;
+        self.time       += dt;
+        self.frame_count += 1;
+        self.fps_acc    += dt;
 
-        // ── Drain streamer ────────────────────────────────────────────────────
-        for event in self.streamer.poll_loaded() {
-            let level = self.stratum.active_level_mut().expect("level");
-            match event {
-                StreamEvent::ChunkReady { coord, data } => {
-                    let n = data.entities.len();
-                    for (_id, components) in chunk_to_components(data) {
-                        level.spawn_entity(components);
-                    }
-                    log::debug!("Chunk {:?} — {} blocks", coord, n);
-                    if let LoadPhase::Streaming { loaded, .. } = &mut self.load_phase {
-                        *loaded += 1;
-                    }
-                }
-                StreamEvent::ChunkError { coord, error } => {
-                    log::warn!("Chunk {:?}: {}", coord, error);
-                    if let LoadPhase::Streaming { loaded, .. } = &mut self.load_phase {
-                        *loaded += 1;
-                    }
-                }
-            }
-        }
-
-        if let LoadPhase::Streaming { expected, loaded } = self.load_phase {
-            if loaded >= expected {
-                self.load_phase = LoadPhase::Ready;
-                let n = self.stratum.active_level().map(|l| l.entities().len()).unwrap_or(0);
-                log::info!("World ready — {} blocks loaded from {} chunks", n, expected);
-            }
-        }
-
-        // ── Camera ────────────────────────────────────────────────────────────
+        // Camera movement.
         {
             let cam = self.stratum.cameras_mut()
                 .get_mut(self.main_cam_id).expect("camera");
-
             cam.yaw   += self.mouse_delta.0 * LOOK_SENS;
             cam.pitch  = (cam.pitch - self.mouse_delta.1 * LOOK_SENS).clamp(-1.5, 1.5);
-
             let fwd   = cam.forward();
             let right = cam.right();
-            let keys  = &self.keys;
-            if keys.contains(&KeyCode::KeyW)      { cam.position += fwd   * CAM_SPEED * dt; }
-            if keys.contains(&KeyCode::KeyS)      { cam.position -= fwd   * CAM_SPEED * dt; }
-            if keys.contains(&KeyCode::KeyA)      { cam.position -= right * CAM_SPEED * dt; }
-            if keys.contains(&KeyCode::KeyD)      { cam.position += right * CAM_SPEED * dt; }
-            if keys.contains(&KeyCode::Space)     { cam.position += Vec3::Y * CAM_SPEED * dt; }
-            if keys.contains(&KeyCode::ShiftLeft) { cam.position -= Vec3::Y * CAM_SPEED * dt; }
+            if self.keys.contains(&KeyCode::KeyW)      { cam.position += fwd   * CAM_SPEED * dt; }
+            if self.keys.contains(&KeyCode::KeyS)      { cam.position -= fwd   * CAM_SPEED * dt; }
+            if self.keys.contains(&KeyCode::KeyA)      { cam.position -= right * CAM_SPEED * dt; }
+            if self.keys.contains(&KeyCode::KeyD)      { cam.position += right * CAM_SPEED * dt; }
+            if self.keys.contains(&KeyCode::Space)     { cam.position += Vec3::Y * CAM_SPEED * dt; }
+            if self.keys.contains(&KeyCode::ShiftLeft) { cam.position -= Vec3::Y * CAM_SPEED * dt; }
         }
         self.mouse_delta = (0.0, 0.0);
 
-        // ── Tick + views ──────────────────────────────────────────────────────
+        let cam_pos = self.stratum.cameras_mut()
+            .get_mut(self.main_cam_id)
+            .map(|c| c.position)
+            .unwrap_or(Vec3::ZERO);
+
+        // Drain stream events into pending queue, then flush up to the per-frame cap.
+        let new_events: Vec<_> = self.streamer.poll_loaded().into_iter().collect();
+        self.chunks.collect_events(new_events);
+        {
+            let level  = self.stratum.active_level_mut().expect("level");
+            let assets = self.integration.assets_mut();
+            self.chunks.flush_events(level, &self.device, assets);
+            self.chunks.update(cam_pos, level, &self.streamer, assets);
+        }
+
         self.stratum.tick(dt);
+
+        // Re-activate all manager-loaded chunks (tick's activation update can fight us).
+        {
+            let level = self.stratum.active_level_mut().expect("level");
+            for &coord in self.chunks.loaded.keys() {
+                level.partition_mut().get_or_create(coord).activate();
+            }
+        }
+
+        // ── Stats every 10 frames ────────────────────────────────────────────
+        if self.frame_count % 10 == 0 {
+            let fps        = if self.fps_acc > 0.0 { 10.0 / self.fps_acc } else { 0.0 };
+            let loaded     = self.chunks.loaded.len();
+            let in_flight  = self.chunks.in_flight.len();
+            let pending    = self.chunks.pending_ready.len();
+            let meshes     = self.integration.assets_mut().mesh_count();
+            eprintln!(
+                "[frame {:5}] fps={:.1}  chunks loaded={} in_flight={} pending={}  meshes={}",
+                self.frame_count, fps, loaded, in_flight, pending, meshes
+            );
+            self.fps_acc = 0.0;
+        }
+
         let size  = self.window.inner_size();
         let views = self.stratum.build_views(size.width, size.height, self.time);
         if views.is_empty() { return; }
@@ -566,35 +723,17 @@ impl AppState {
             Ok(t)  => t,
             Err(e) => { log::warn!("Surface error: {e:?}"); return; }
         };
-        let surface_view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
-
+        let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
         let level = self.stratum.active_level().expect("level");
 
         if self.stratum.mode() == SimulationMode::Editor {
             self.integration.debug_draw_world_partition(level.partition());
         }
-
-        if let Err(e) = self.integration.submit_frame(&views, level, &surface_view, dt) {
+        if let Err(e) = self.integration.submit_frame(&views, level, &view, dt) {
             log::error!("Render error: {e:?}");
         }
-
         output.present();
     }
-}
-
-// ── Sprite fallback (no billboard in this demo, but BillboardsFeature needs one)
-
-fn load_sprite() -> (Vec<u8>, u32, u32) {
-    let bytes: &[u8] = include_bytes!("../../assets/spotlight.png");
-    let img = image::load_from_memory(bytes)
-        .unwrap_or_else(|_| {
-            let mut px = image::RgbaImage::new(1, 1);
-            px.put_pixel(0, 0, image::Rgba([255, 255, 255, 255]));
-            image::DynamicImage::ImageRgba8(px)
-        })
-        .into_rgba8();
-    let (w, h) = img.dimensions();
-    (img.into_raw(), w, h)
 }
 
 // ── main ──────────────────────────────────────────────────────────────────────
@@ -605,13 +744,12 @@ fn main() {
         .init();
 
     log::info!(
-        "Voxel world — {}×{} chunks, {}×{} blocks per chunk",
-        WORLD_CHUNKS_X, WORLD_CHUNKS_Z,
-        VOXELS_PER_CHUNK, VOXELS_PER_CHUNK
+        "Infinite voxel world — chunk {}m, load radius {} → {} chunks max",
+        CHUNK_SIZE as i32, LOAD_RADIUS, (LOAD_RADIUS * 2 + 1).pow(2),
     );
-    log::info!("Controls: WASD fly | Space/Shift up/down | Mouse look | Tab mode | Esc exit");
+    log::info!("WASD fly | Space/Shift up/down | Mouse look (click) | Tab mode | Esc exit");
 
     EventLoop::new().expect("event loop")
         .run_app(&mut App::new())
-        .expect("event loop error");
+        .expect("run_app failed");
 }
