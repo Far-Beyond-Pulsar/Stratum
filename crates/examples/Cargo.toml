@@ -15,6 +15,10 @@ path = "stratum_advanced.rs"
 name = "level_fs"
 path = "level_fs.rs"
 
+[[example]]
+name = "voxel_world"
+path = "voxel_world.rs"
+
 [dependencies]
 stratum         = { workspace = true }
 stratum-helio   = { workspace = true }
