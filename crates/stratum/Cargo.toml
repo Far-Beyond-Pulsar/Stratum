@@ -5,5 +5,8 @@ edition     = "2021"
 description = "World orchestration layer for the Pulsar engine — levels, spatial streaming, cameras, render views."
 
 [dependencies]
-glam = { workspace = true }
-log  = { workspace = true }
+glam       = { workspace = true }
+log        = { workspace = true }
+thiserror  = { workspace = true }
+serde      = { workspace = true }
+serde_json = { workspace = true }

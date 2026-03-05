@@ -46,6 +46,7 @@ pub mod visibility;
 pub mod render_graph;
 pub mod level;
 pub mod mode;
+pub mod level_fs;
 
 mod stratum;
 
@@ -63,3 +64,8 @@ pub use camera::{CameraId, StratumCamera, CameraKind, Projection};
 pub use camera_registry::CameraRegistry;
 pub use render_view::{RenderView, RenderTargetHandle, Viewport};
 pub use visibility::Frustum;
+pub use level_fs::{
+    LevelManifest, LevelStreamer, StreamEvent, LevelFsError,
+    save_level, load_manifest, load_chunk, load_sector_index,
+    chunk_to_components,
+};
