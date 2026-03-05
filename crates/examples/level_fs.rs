@@ -157,7 +157,7 @@ fn build_and_save(
     level.spawn_entity(
         Components::new()
             .with_transform(Transform::from_position(Vec3::new(14.0, 5.5, 14.0)))
-            .with_light(LightData::Point { color: [1.0, 0.75, 0.3], intensity: 80.0, range: 18.0 })
+            .with_light(LightData::Point { color: [1.0, 0.75, 0.3], intensity: 6.0, range: 18.0 })
             .with_billboard(BillboardData::new(1.5, 1.5, [1.0, 0.75, 0.3, 0.9]))
             .with_tag("lantern"),
     );
@@ -178,7 +178,7 @@ fn build_and_save(
     level.spawn_entity(
         Components::new()
             .with_transform(Transform::from_position(Vec3::new(48.0, 7.0, 16.0)))
-            .with_light(LightData::Point { color: [0.3, 0.6, 1.0], intensity: 500.0, range: 16.0 })
+            .with_light(LightData::Point { color: [0.3, 0.6, 1.0], intensity: 5.0, range: 16.0 })
             .with_billboard(BillboardData::new(1.5, 1.5, [0.3, 0.6, 1.0, 0.9]))
             .with_tag("blue_lamp"),
     );
@@ -212,7 +212,7 @@ fn build_and_save(
     level.spawn_entity(
         Components::new()
             .with_transform(Transform::from_position(Vec3::new(-6.0, 6.0, 20.0)))
-            .with_light(LightData::Point { color: [1.0, 0.5, 0.1], intensity: 400.0, range: 12.0 })
+            .with_light(LightData::Point { color: [1.0, 0.5, 0.1], intensity: 5.0, range: 12.0 })
             .with_billboard(BillboardData::new(1.2, 1.2, [1.0, 0.5, 0.1, 0.85]))
             .with_tag("torch_light"),
     );
@@ -228,7 +228,7 @@ fn build_and_save(
     level.spawn_entity(
         Components::new()
             .with_transform(Transform::from_position(Vec3::new(74.0, 18.0, 74.0)))
-            .with_light(LightData::Point { color: [1.0, 0.1, 0.1], intensity: 800.0, range: 22.0 })
+            .with_light(LightData::Point { color: [1.0, 0.1, 0.1], intensity: 7.0, range: 22.0 })
             .with_billboard(BillboardData::new(1.8, 1.8, [1.0, 0.1, 0.1, 0.9]))
             .with_tag("boss_light"),
     );
@@ -347,7 +347,7 @@ impl ApplicationHandler for App {
         let (sprite_rgba, sw, sh) = load_sprite("spotlight.png");
         let features = FeatureRegistry::builder()
             .with_feature(LightingFeature::new())
-            .with_feature(BloomFeature::new().with_intensity(0.6).with_threshold(0.7))
+            .with_feature(BloomFeature::new().with_intensity(0.3).with_threshold(1.2))
             .with_feature(ShadowsFeature::new().with_atlas_size(2048).with_max_lights(8))
             .with_feature(BillboardsFeature::new().with_sprite(sprite_rgba, sw, sh))
             .with_feature(
