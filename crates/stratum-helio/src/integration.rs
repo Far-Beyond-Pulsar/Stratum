@@ -20,8 +20,8 @@
 
 use std::collections::HashMap;
 
-use glam::Quat;
-use stratum::{ChunkState, Level, RenderTargetHandle, RenderView, WorldPartition};
+use glam::{Quat, Vec3};
+use stratum::{ChunkState, EntityStore, Level, LightData, RenderTargetHandle, RenderView, WorldPartition};
 use helio_render_v2::Renderer;
 
 use crate::asset_registry::AssetRegistry;
@@ -106,8 +106,49 @@ impl HelioIntegration {
         }
     }
 
-    // ── Frame submission ──────────────────────────────────────────────────────
+    /// Submit debug attenuation volumes for every light entity in `store`.
+    ///
+    /// * **Point** light → wireframe sphere at the light position with radius = `range`.
+    /// * **Spot**  light → wireframe cone with apex at position, pointing along
+    ///   `direction`, height = `range`, base radius = `range * tan(outer_angle)`.
+    /// * **Directional** light → three short arrows in the light direction (no
+    ///   attenuation to visualise, so just a direction indicator).
+    ///
+    /// Call before `submit_frame` so shapes are flushed with the same render call.
+    pub fn debug_draw_lights(&mut self, store: &EntityStore) {
+        for (_id, components) in store.iter() {
+            let (Some(light), Some(transform)) = (&components.light, &components.transform)
+            else { continue };
 
+            let pos = transform.position;
+
+            match light {
+                LightData::Point { color, range, .. } => {
+                    let c = [color[0], color[1], color[2], 0.5];
+                    self.renderer.debug_sphere(pos, *range, c, 0.03);
+                }
+
+                LightData::Spot { direction, color, range, outer_angle, .. } => {
+                    let dir = Vec3::from(*direction).normalize_or_zero();
+                    let base_radius = range * outer_angle.tan();
+                    let c = [color[0], color[1], color[2], 0.55];
+                    self.renderer.debug_cone(pos, dir, *range, base_radius, c, 0.03);
+                }
+
+                LightData::Directional { direction, color, .. } => {
+                    // Three parallel arrow shafts to show direction (no range).
+                    let dir  = Vec3::from(*direction).normalize_or_zero();
+                    let c    = [color[0], color[1], color[2], 0.6];
+                    for offset in [Vec3::ZERO, Vec3::X * 0.4, Vec3::Z * 0.4] {
+                        let start = pos + offset;
+                        self.renderer.debug_line(start, start + dir * 3.0, c, 0.03);
+                    }
+                }
+            }
+        }
+    }
+
+    // ── Frame submission ──────────────────────────────────────────────────────
     /// Submit all render views for one frame.
     ///
     /// # Parameters

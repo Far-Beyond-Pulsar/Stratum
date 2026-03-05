@@ -18,7 +18,7 @@
 //! | Space / LShift   | Fly up / down                                 |
 //! | Left mouse drag  | Look (click window first to grab cursor)      |
 //! | Tab              | Toggle Editor ↔ Game mode                     |
-//! | F1               | Main perspective camera (Game mode)           |
+//! | F1               | Main perspective camera (Editor mode)         |
 //! | F2               | Top-down overview camera (Game mode)          |
 //! | F3               | Print partition + entity debug stats          |
 //! | P                | Toggle world-partition chunk AABB wireframes  |
@@ -556,7 +556,7 @@ impl ApplicationHandler for App {
         let gpu_cube_mat = integration.create_material(&cube_material_desc);
         let h_cube_mat: MaterialHandle = integration.assets_mut().add_material(gpu_cube_mat);
         // ── Stratum world setup ───────────────────────────────────────────────
-        let mut stratum = Stratum::new(SimulationMode::Game);
+        let mut stratum = Stratum::new(SimulationMode::Editor);
         let level_id    = stratum.create_level("advanced_world", CHUNK_SIZE, ACTIVATION_RADIUS);
         let level       = stratum.level_mut(level_id).unwrap();
 
@@ -714,15 +714,16 @@ impl ApplicationHandler for App {
         // ── Camera registry ───────────────────────────────────────────────────
         //
         // Three cameras:
-        //  1. main_cam     — GameCamera, free-fly perspective, starts at edge
-        //  2. overview_cam — GameCamera, top-down orthographic, centre above world
-        //  3. editor_cam   — EditorPerspective, same start as main (Tab to access)
+        //  1. main_cam     — EditorPerspective, free-fly (default/editor mode)
+        //  2. overview_cam — GameCamera, top-down orthographic (Tab → Game mode)
+        //  3. editor_cam   — GameCamera, locked perspective (Tab → Game mode)
         //
-        // Only main_cam starts as active Game camera.
+        // Starts in Editor mode so main_cam renders immediately.
 
+        // Main free-fly camera — EditorPerspective, active in Editor mode (default).
         let main_cam_id = stratum.register_camera(StratumCamera {
             id:            CameraId::PLACEHOLDER,
-            kind:          CameraKind::GameCamera { tag: "main".into() },
+            kind:          CameraKind::EditorPerspective,
             position:      Vec3::new(45.0, 15.0, 95.0),
             yaw:           0.0,
             pitch:         -0.28,
@@ -750,10 +751,10 @@ impl ApplicationHandler for App {
             active:        false,
         });
 
-        // Editor camera — only renders when Tab has switched to Editor mode.
+        // Game camera — locked perspective, only renders in Game mode (Tab to switch).
         let editor_cam_id = stratum.register_camera(StratumCamera {
             id:            CameraId::PLACEHOLDER,
-            kind:          CameraKind::EditorPerspective,
+            kind:          CameraKind::GameCamera { tag: "game".into() },
             position:      Vec3::new(45.0, 15.0, 95.0),
             yaw:           0.0,
             pitch:         -0.28,
@@ -1125,6 +1126,11 @@ impl AppState {
 
         if self.show_partition_debug {
             self.integration.debug_draw_world_partition(level.partition());
+        }
+
+        // In editor mode draw light attenuation volumes (spheres / cones).
+        if self.stratum.mode() == SimulationMode::Editor {
+            self.integration.debug_draw_lights(level.entities());
         }
 
         if let Err(e) = self.integration.submit_frame(&views, level, &surface_view, dt) {
