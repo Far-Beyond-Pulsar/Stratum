@@ -216,7 +216,36 @@ pub fn chunk_to_components(chunk: ChunkFile) -> Vec<(EntityId, Components)> {
         .collect()
 }
 
-// ── Private helpers ───────────────────────────────────────────────────────────
+/// Walk `{level_dir}/indexes/` recursively and collect every `ChunkCoord`
+/// that has a written index entry — without loading individual chunk files.
+///
+/// Useful at startup to know which coords to pre-request from the streamer.
+pub fn discover_chunk_coords(level_dir: &Path) -> Result<Vec<ChunkCoord>, LevelFsError> {
+    let mut coords = Vec::new();
+    let index_root = level_dir.join("indexes");
+    if !index_root.exists() {
+        return Ok(coords);
+    }
+    collect_index_entries(&index_root, &mut coords)?;
+    Ok(coords)
+}
+
+fn collect_index_entries(dir: &Path, out: &mut Vec<ChunkCoord>) -> Result<(), LevelFsError> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path  = entry.path();
+        if path.is_dir() {
+            collect_index_entries(&path, out)?;
+        } else if path.file_name().map(|n| n == "index.json").unwrap_or(false) {
+            let idx: SectorIndex = read_json(&path)?;
+            for e in idx.entries {
+                out.push(ChunkCoord::new(e.coord[0], e.coord[1], e.coord[2]));
+            }
+        }
+    }
+    Ok(())
+}
+
 
 fn write_json<T: serde::Serialize>(path: &Path, value: &T) -> Result<(), LevelFsError> {
     let json = serde_json::to_string_pretty(value)?;

@@ -36,7 +36,12 @@ use stratum::{
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 fn level_dir() -> PathBuf {
-    std::env::temp_dir().join("stratum_level_fs_example")
+    // Stored at {workspace_root}/levels/example_world/
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("levels")
+        .join("example_world")
 }
 
 fn heading(title: &str) {
@@ -227,10 +232,8 @@ fn main() {
 
     // ── Done ──────────────────────────────────────────────────────────────────
     heading("Done");
-    println!("  All steps completed successfully.\n");
-
-    // Clean up temp dir.
-    let _ = std::fs::remove_dir_all(&dir);
+    println!("  All steps completed successfully.");
+    println!("  Level files saved to: {}\n", dir.display());
 }
 
 // ── Utility: print a simple tree ─────────────────────────────────────────────
