@@ -503,7 +503,6 @@ impl ApplicationHandler for App {
             integration.assets_mut().add_material(g)
         };
 
-        // Stratum world — empty, chunks stream in each frame.
         let mut stratum  = Stratum::new(SimulationMode::Editor);
         let level_id     = stratum.create_level("voxel_world", CHUNK_SIZE, ACTIVATION_RADIUS);
         stratum.level_mut(level_id).unwrap().activate_all_chunks();
@@ -726,9 +725,7 @@ impl AppState {
         let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
         let level = self.stratum.active_level().expect("level");
 
-        if self.stratum.mode() == SimulationMode::Editor {
-            self.integration.debug_draw_world_partition(level.partition());
-        }
+
         if let Err(e) = self.integration.submit_frame(&views, level, &view, dt) {
             log::error!("Render error: {e:?}");
         }
