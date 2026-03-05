@@ -32,6 +32,12 @@ enum Request {
         coord:     ChunkCoord,
         generator: Box<dyn FnOnce(ChunkCoord) -> ChunkFile + Send>,
     },
+    /// Run a generator closure on the worker thread and return the chunk data
+    /// without persisting it to disk.
+    GenerateTransient {
+        coord:     ChunkCoord,
+        generator: Box<dyn FnOnce(ChunkCoord) -> ChunkFile + Send>,
+    },
     Shutdown,
 }
 
@@ -135,6 +141,18 @@ impl LevelStreamer {
         let _ = self.tx.send(Request::Generate { level_dir, coord, generator });
     }
 
+    /// Enqueue a generate-on-worker request that does not save to disk.
+    ///
+    /// Useful for fully procedural worlds where chunk files are treated as
+    /// ephemeral runtime data and persistence would cause excessive disk I/O.
+    pub fn request_generate_transient(
+        &self,
+        coord:     ChunkCoord,
+        generator: Box<dyn FnOnce(ChunkCoord) -> ChunkFile + Send>,
+    ) {
+        let _ = self.tx.send(Request::GenerateTransient { coord, generator });
+    }
+
     /// Drain all `StreamEvent`s that have completed since the last call.
     ///
     /// Returns an empty `Vec` if nothing has finished yet.  Intended to be
@@ -196,6 +214,12 @@ fn worker(req_rx: Receiver<Request>, evt_tx: Sender<StreamEvent>) {
                     Err(e) => StreamEvent::ChunkError { coord, error: e.to_string() },
                 };
                 if evt_tx.send(event).is_err() {
+                    break;
+                }
+            }
+            Request::GenerateTransient { coord, generator } => {
+                let data = generator(coord);
+                if evt_tx.send(StreamEvent::ChunkReady { coord, data }).is_err() {
                     break;
                 }
             }

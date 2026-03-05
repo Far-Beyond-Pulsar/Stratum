@@ -103,8 +103,7 @@ impl VoxelChunkManager {
                 streamer.request_chunk(self.dir.clone(), coord);
             } else {
                 let lib = Arc::clone(&self.lib);
-                streamer.request_generate(
-                    self.dir.clone(),
+                streamer.request_generate_transient(
                     coord,
                     Box::new(move |c| generation::build_chunk_file(c, &lib)),
                 );
