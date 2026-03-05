@@ -39,6 +39,7 @@
 
 pub mod format;
 pub mod io;
+pub mod prefab_io;
 pub mod streaming;
 
 pub use format::LevelManifest;
@@ -47,6 +48,7 @@ pub use io::{
     load_chunk, load_manifest, load_sector_index,
     save_chunk, save_level, sector_for, DEFAULT_BUCKET_SIZE,
 };
+pub use prefab_io::{load_prefab, prefab_file_path, save_prefab, unpack_instance};
 pub use streaming::{LevelStreamer, StreamEvent};
 
 use thiserror::Error;
@@ -69,4 +71,8 @@ pub enum LevelFsError {
     /// empty chunk rather than a fatal error.
     #[error("chunk not found: {0}")]
     ChunkNotFound(String),
+
+    /// The requested prefab file does not exist under `{level_dir}/prefabs/`.
+    #[error("prefab not found: {0}")]
+    PrefabNotFound(String),
 }

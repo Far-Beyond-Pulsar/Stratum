@@ -63,13 +63,60 @@ pub struct ChunkEntry {
 /// Full chunk payload — stored at
 /// `{level_dir}/chunks/{x}_{y}_{z}.chunk.json`.
 ///
-/// Contains every entity whose `Transform.position` maps into this chunk cell.
+/// Contains every entity whose `Transform.position` maps into this chunk cell,
+/// plus any prefab instances that have been placed in this chunk.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChunkFile {
     pub version:  u32,
     /// Grid coordinate of the chunk `[x, y, z]`.
     pub coord:    [i32; 3],
     pub entities: Vec<EntityRecord>,
+    /// Prefab placements recorded in this chunk.
+    ///
+    /// Each entry either stays as a lightweight reference (`mode = "ref"`) or
+    /// has already been expanded into `entities` above (`mode = "unpacked"`).
+    /// Absent when empty (omitted from JSON).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prefab_instances: Vec<PrefabInstanceRecord>,
+}
+
+// ── Prefab records ────────────────────────────────────────────────────────────
+
+/// One placed instance of a prefab recorded in a chunk file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PrefabInstanceRecord {
+    /// Name of the source prefab (used to look it up in the registry or on disk).
+    pub prefab: String,
+    /// World-space placement transform.
+    pub transform: TransformRecord,
+    /// `"ref"` — entities are NOT in the chunk's `entities` list; they must be
+    /// resolved from the prefab definition at load time.
+    /// `"unpacked"` — entities have already been expanded into `entities`.
+    #[serde(default = "default_mode")]
+    pub mode: String,
+}
+
+fn default_mode() -> String { "ref".into() }
+
+/// On-disk representation of a full prefab definition.
+///
+/// Stored at `{level_dir}/prefabs/{name}.prefab.json`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PrefabFile {
+    pub version:  u32,
+    pub name:     String,
+    pub entities: Vec<EntityRecord>,
+    pub volumes:  Vec<PrefabVolumeRecord>,
+}
+
+/// Serializable representation of one [`PrefabVolume`](crate::prefab::PrefabVolume).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PrefabVolumeRecord {
+    /// AABB minimum corner `[x, y, z]` in local (prefab) space.
+    pub min:    [f32; 3],
+    /// AABB maximum corner `[x, y, z]` in local (prefab) space.
+    pub max:    [f32; 3],
+    pub hollow: bool,
 }
 
 // ── EntityRecord ──────────────────────────────────────────────────────────────

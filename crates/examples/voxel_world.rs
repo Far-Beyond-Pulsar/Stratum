@@ -4,10 +4,14 @@
 //! partition chunk maps 1:1 to one on-disk file under `levels/voxel_world/`.
 //!
 //! ## Mesh strategy
-//! A single `GpuMesh` is built per material (grass / dirt / stone) per chunk.
+//! A single `GpuMesh` is built per material per chunk.
 //! Only exposed faces are emitted — interior faces between two solid blocks are
-//! culled. This keeps draw-call count at ≤ 3 per loaded chunk and vertex count
-//! proportional to surface area rather than volume.
+//! culled. This keeps draw-call count proportional to material count per chunk.
+//!
+//! ## Features
+//! * Procedural terrain (grass / dirt / stone)
+//! * Oak trees — solid log trunk + hollow leaf canopy
+//! * Villages — clusters of stone-brick cottages with plank roofs and glass windows
 //!
 //! ## Controls
 //! WASD fly | Space/Shift up/down | Mouse drag look (click to grab) | Tab mode | Esc exit
@@ -32,10 +36,10 @@ use helio_render_v2::{
 
 use stratum::{
     chunk_on_disk,
-    CameraId, CameraKind, ChunkCoord, Components, EntityId, LightData,
-    MaterialHandle, Projection, RenderTargetHandle,
-    SimulationMode, Stratum, StratumCamera, Transform, Viewport,
-    Level, StreamEvent, LevelStreamer, MeshHandle,
+    Aabb, CameraId, CameraKind, ChunkCoord, Components, EntityId, LightData,
+    MaterialHandle, PlacementContext, Prefab, PrefabVolume, Projection,
+    RenderTargetHandle, SimulationMode, Stratum, StratumCamera, Transform,
+    Viewport, Level, StreamEvent, LevelStreamer, MeshHandle,
     level_fs::format::{ChunkFile, EntityRecord, TransformRecord, FORMAT_VERSION},
 };
 use stratum_helio::{AssetRegistry, HelioIntegration, Material};
@@ -51,7 +55,7 @@ fn level_dir() -> PathBuf {
 }
 
 /// Bump this key to wipe stale on-disk chunks after format changes.
-const CACHE_KEY: &str = "voxel_world_v4_chunk16";
+const CACHE_KEY: &str = "voxel_world_v6_mountains_forests";
 
 // ── World constants ───────────────────────────────────────────────────────────
 
@@ -61,23 +65,76 @@ const VOXELS_PER_CHUNK: i32 = 16;
 const ACTIVATION_RADIUS: f32 = CHUNK_SIZE * 8.0;
 /// Half-side of the square load area in chunk coords.
 const LOAD_RADIUS: i32 = 5;
-const BASE_HEIGHT: i32 = 2;
-const HEIGHT_RANGE: i32 = 10; // max surface = 12, fits in Y=0 chunk (0..VOXELS_PER_CHUNK)
+/// How many Y-chunk layers to load (covers 0..MAX_Y_CHUNKS*16 metres).
+const MAX_Y_CHUNKS: i32 = 3; // 0..47 m covers mountains
 
-const CAM_SPEED: f32 = 16.0;
+// Terrain shaping
+const BASE_HEIGHT: i32 = 4;
+const GENTLE_RANGE: i32 = 10;  // gentle hills add up to 10 m above base
+const MOUNTAIN_BONUS: i32 = 38; // mountains can add up to 38 m on top of gentle hills
+
+/// Surface height above which no trees or structures spawn (stone-only zone).
+const STRUCTURE_HEIGHT_CUTOFF: i32 = 12;
+
+// Forest biome
+/// Low-freq noise threshold; above this = forest zone.
+const FOREST_THRESHOLD: f32 = 0.50;
+/// Within the forest zone, individual spot noise must exceed this to plant a tree.
+const FOREST_TREE_SPOT_MIN: f32 = 0.58;
+/// Minimum world-block separation between tree grid sample points.
+const TREE_GRID_STEP: i32 = 5;
+
+// Village macro-grid
+/// Side length in chunk-coordinates of one village macro-cell.
+const VILLAGE_GRID: i32 = 22;
+/// Fraction of macro-cells that contain a village.
+const VILLAGE_PROBABILITY: f32 = 0.28;
+/// Village radius in chunk-coordinates (houses cluster within this from center).
+const VILLAGE_CHUNK_RADIUS: i32 = 3;
+/// Min/max house count per village.
+const VILLAGE_HOUSE_MIN: usize = 4;
+const VILLAGE_HOUSE_MAX: usize = 8;
+
+// Ruined towers
+const TOWER_PROBABILITY: f32 = 0.022; // ~2% of chunks may have a tower
+
+const CAM_SPEED: f32 = 28.0;
 const LOOK_SENS: f32 = 0.002;
 
 // ── Block type ────────────────────────────────────────────────────────────────
 
 /// Block discriminant stored in chunk JSON as `material` field index.
-///   0 = air (not stored), 1 = grass, 2 = dirt, 3 = stone
+///   0 = air (not stored)
+///   1 = grass   2 = dirt    3 = stone
+///   4 = wood    5 = leaves  6 = stone_brick  7 = plank  8 = glass
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-enum Block { Grass, Dirt, Stone }
+enum Block { Grass, Dirt, Stone, Wood, Leaves, StoneBrick, Plank, Glass }
 
 impl Block {
-    fn mat_index(self) -> u64 { match self { Block::Grass => 1, Block::Dirt => 2, Block::Stone => 3 } }
+    fn mat_index(self) -> u64 {
+        match self {
+            Block::Grass      => 1,
+            Block::Dirt       => 2,
+            Block::Stone      => 3,
+            Block::Wood       => 4,
+            Block::Leaves     => 5,
+            Block::StoneBrick => 6,
+            Block::Plank      => 7,
+            Block::Glass      => 8,
+        }
+    }
     fn from_mat_index(n: u64) -> Option<Self> {
-        match n { 1 => Some(Block::Grass), 2 => Some(Block::Dirt), 3 => Some(Block::Stone), _ => None }
+        match n {
+            1 => Some(Block::Grass),
+            2 => Some(Block::Dirt),
+            3 => Some(Block::Stone),
+            4 => Some(Block::Wood),
+            5 => Some(Block::Leaves),
+            6 => Some(Block::StoneBrick),
+            7 => Some(Block::Plank),
+            8 => Some(Block::Glass),
+            _ => None,
+        }
     }
 }
 
@@ -102,46 +159,487 @@ fn smooth_noise(x: f32, z: f32, seed: u64) -> f32 {
     (a + ux*(b-a)) + uz * ((c + ux*(d-c)) - (a + ux*(b-a)))
 }
 
-fn terrain_height(wx: i32, wz: i32) -> i32 {
-    let (x, z) = (wx as f32, wz as f32);
-    let n = smooth_noise(x/20.0, z/20.0, 0)
-          + smooth_noise(x/10.0, z/10.0, 1) * 0.5
-          + smooth_noise(x/5.0,  z/5.0,  2) * 0.25;
-    let n = (n / 1.75).clamp(0.0, 1.0);
-    BASE_HEIGHT + (n * HEIGHT_RANGE as f32) as i32
+// ── Terrain ───────────────────────────────────────────────────────────────────
+
+/// Mountain influence 0..1 at world position (wx, wz).
+/// Returns > 0 only in mountain zones; peaks at 1.0.
+fn mountain_factor(wx: f32, wz: f32) -> f32 {
+    let raw = smooth_noise(wx / 88.0, wz / 88.0, 20)
+            + smooth_noise(wx / 44.0, wz / 44.0, 21) * 0.5;
+    let raw = (raw / 1.5).clamp(0.0, 1.0);
+    // Smooth threshold — only the top portion becomes mountain.
+    ((raw - 0.52) / 0.48).max(0.0).clamp(0.0, 1.0)
 }
 
-fn block_type(wx: i32, wy: i32, wz: i32) -> Block {
-    let h = terrain_height(wx, wz);
-    if wy == h          { Block::Grass }
-    else if wy >= h - 2 { Block::Dirt  }
-    else                { Block::Stone }
+fn terrain_height(wx: i32, wz: i32) -> i32 {
+    let (x, z) = (wx as f32, wz as f32);
+
+    // Gentle rolling hills (2-3 octaves)
+    let hills = smooth_noise(x / 24.0, z / 24.0, 10)
+              + smooth_noise(x / 12.0, z / 12.0, 11) * 0.5
+              + smooth_noise(x /  6.0, z /  6.0, 12) * 0.25;
+    let hills = (hills / 1.75).clamp(0.0, 1.0);
+    let gentle_h = BASE_HEIGHT + (hills * GENTLE_RANGE as f32) as i32;
+
+    // Mountain boost
+    let mf = mountain_factor(x, z);
+    gentle_h + (mf * MOUNTAIN_BONUS as f32) as i32
+}
+
+fn block_type(wy: i32, surface_h: i32) -> Block {
+    // High-altitude bare stone (mountainside)
+    if wy > 22 && wy >= surface_h - 1 { return Block::Stone; }
+    if wy == surface_h      { Block::Grass }
+    else if wy >= surface_h - 2 { Block::Dirt }
+    else                    { Block::Stone }
+}
+
+// ── Biome queries ─────────────────────────────────────────────────────────────
+
+/// Low-frequency noise that defines forest blobs.  Returns 0..1.
+/// Values > FOREST_THRESHOLD → forest zone.
+fn forest_noise_at(wx: f32, wz: f32) -> f32 {
+    let n = smooth_noise(wx / 62.0, wz / 62.0, 30)
+          + smooth_noise(wx / 31.0, wz / 31.0, 31) * 0.5;
+    (n / 1.5).clamp(0.0, 1.0)
+}
+
+/// High-frequency noise that controls individual tree spots within a forest.
+fn tree_spot_noise(wx: f32, wz: f32) -> f32 {
+    smooth_noise(wx / 9.0, wz / 9.0, 40)
+        + smooth_noise(wx / 4.5, wz / 4.5, 41) * 0.4
+}
+
+/// Returns true if (wx, wz) is inside a forest zone (no mountains, high forest noise).
+fn is_forest_zone(wx: i32, wz: i32) -> bool {
+    let mf = mountain_factor(wx as f32, wz as f32);
+    if mf > 0.15 { return false; } // mountains suppress forests
+    forest_noise_at(wx as f32, wz as f32) > FOREST_THRESHOLD
+}
+
+// ── Village macro-grid ────────────────────────────────────────────────────────
+
+/// Returns the chunk-coordinate of the village center inside macro-cell (cx, cz),
+/// or `None` if this cell has no village.
+fn village_center_for_cell(cell_x: i32, cell_z: i32) -> Option<(i32, i32)> {
+    if hash(cell_x, cell_z, 77) > VILLAGE_PROBABILITY { return None; }
+    let margin = 3.0;
+    let range  = (VILLAGE_GRID as f32) - margin * 2.0;
+    let fx = margin + hash(cell_x, cell_z, 78) * range;
+    let fz = margin + hash(cell_x, cell_z, 79) * range;
+    Some((cell_x * VILLAGE_GRID + fx as i32,
+          cell_z * VILLAGE_GRID + fz as i32))
+}
+
+/// If chunk `(chunk_x, chunk_z)` is within any village's radius, return that
+/// village's center chunk-coord.
+fn village_center_near(chunk_x: i32, chunk_z: i32) -> Option<(i32, i32)> {
+    let cell_x = chunk_x.div_euclid(VILLAGE_GRID);
+    let cell_z = chunk_z.div_euclid(VILLAGE_GRID);
+    for dcx in -1..=1 {
+        for dcz in -1..=1 {
+            if let Some((vcx, vcz)) = village_center_for_cell(cell_x + dcx, cell_z + dcz) {
+                if (chunk_x - vcx).abs() <= VILLAGE_CHUNK_RADIUS
+                && (chunk_z - vcz).abs() <= VILLAGE_CHUNK_RADIUS {
+                    return Some((vcx, vcz));
+                }
+            }
+        }
+    }
+    None
+}
+
+// ── Prefab definitions ────────────────────────────────────────────────────────
+
+fn voxel_entity(lx: f32, ly: f32, lz: f32, block: Block) -> Components {
+    Components::new()
+        .with_transform(Transform::from_position(Vec3::new(lx + 0.5, ly + 0.5, lz + 0.5)))
+        .with_material(stratum::MaterialHandle(block.mat_index()))
+        .with_bounding_radius(0.866)
+}
+
+/// Standard oak tree: 5-block trunk + rounded 5×4×5 canopy.
+fn make_tree_prefab() -> Prefab {
+    let mut b = Prefab::builder("tree_oak");
+    for y in 0..5_i32 {
+        b = b.with_entity(voxel_entity(-0.5, y as f32, -0.5, Block::Wood));
+    }
+    // Canopy — 4 layers, widest in the middle
+    for dy in 0..4_i32 {
+        let r: i32 = match dy { 1 | 2 => 2, _ => 1 };
+        for dx in -r..=r {
+            for dz in -r..=r {
+                if r == 2 && dx.abs() == 2 && dz.abs() == 2 && (dy == 0 || dy == 3) { continue; }
+                b = b.with_entity(voxel_entity(dx as f32 - 0.5, (dy + 3) as f32, dz as f32 - 0.5, Block::Leaves));
+            }
+        }
+    }
+    b = b.with_volume(PrefabVolume::solid(Aabb::new(
+        Vec3::new(-0.5, 0.0, -0.5), Vec3::new(0.5, 5.0, 0.5),
+    )));
+    b = b.with_volume(PrefabVolume::hollow(Aabb::new(
+        Vec3::new(-2.5, 3.0, -2.5), Vec3::new(2.5, 7.0, 2.5),
+    )));
+    b.build()
+}
+
+/// Taller pine-style tree: 7-block trunk, narrow 3×4×3 pointed canopy.
+fn make_tall_tree_prefab() -> Prefab {
+    let mut b = Prefab::builder("tree_pine");
+    for y in 0..7_i32 {
+        b = b.with_entity(voxel_entity(-0.5, y as f32, -0.5, Block::Wood));
+    }
+    // Pointed canopy — narrow at top, wider at base
+    for dy in 0..4_i32 {
+        let r: i32 = 2 - (dy / 2);
+        for dx in -r..=r {
+            for dz in -r..=r {
+                b = b.with_entity(voxel_entity(dx as f32 - 0.5, (dy + 4) as f32, dz as f32 - 0.5, Block::Leaves));
+            }
+        }
+    }
+    b = b.with_volume(PrefabVolume::solid(Aabb::new(
+        Vec3::new(-0.5, 0.0, -0.5), Vec3::new(0.5, 7.0, 0.5),
+    )));
+    b = b.with_volume(PrefabVolume::hollow(Aabb::new(
+        Vec3::new(-2.5, 4.0, -2.5), Vec3::new(2.5, 8.0, 2.5),
+    )));
+    b.build()
+}
+
+/// Cottage: 7×7 footprint, 4 blocks of wall, stone-brick + plank roof + glass windows.
+fn make_house_prefab() -> Prefab {
+    let mut b = Prefab::builder("house_cottage");
+    let w = 7_i32;
+    let wall_h = 4_i32;
+
+    for x in 0..w {
+        for z in 0..w {
+            b = b.with_entity(voxel_entity(x as f32, 0.0, z as f32, Block::Plank));
+            let on_edge = x == 0 || x == w-1 || z == 0 || z == w-1;
+            if on_edge {
+                for y in 1..wall_h {
+                    let is_window = y == 2
+                        && ((x == 0 || x == w-1) && z > 1 && z < w-2
+                            || (z == 0 || z == w-1) && x > 1 && x < w-2);
+                    b = b.with_entity(voxel_entity(
+                        x as f32, y as f32, z as f32,
+                        if is_window { Block::Glass } else { Block::StoneBrick },
+                    ));
+                }
+            }
+            b = b.with_entity(voxel_entity(x as f32, wall_h as f32, z as f32, Block::Plank));
+        }
+    }
+    b = b.with_volume(PrefabVolume::solid(Aabb::new(
+        Vec3::new(0.0, 0.0, 0.0),
+        Vec3::new(w as f32, (wall_h + 1) as f32, w as f32),
+    )));
+    b = b.with_volume(PrefabVolume::hollow(Aabb::new(
+        Vec3::new(1.0, 1.0, 1.0),
+        Vec3::new((w-1) as f32, wall_h as f32, (w-1) as f32),
+    )));
+    b.build()
+}
+
+/// Larger house variant: 9×9 footprint, adds a chimney.
+fn make_large_house_prefab() -> Prefab {
+    let mut b = Prefab::builder("house_large");
+    let w = 9_i32;
+    let wall_h = 5_i32;
+
+    for x in 0..w {
+        for z in 0..w {
+            b = b.with_entity(voxel_entity(x as f32, 0.0, z as f32, Block::Plank));
+            let on_edge = x == 0 || x == w-1 || z == 0 || z == w-1;
+            if on_edge {
+                for y in 1..wall_h {
+                    let is_window = y == 2
+                        && ((x == 0 || x == w-1) && z > 1 && z < w-2
+                            || (z == 0 || z == w-1) && x > 1 && x < w-2);
+                    b = b.with_entity(voxel_entity(
+                        x as f32, y as f32, z as f32,
+                        if is_window { Block::Glass } else { Block::StoneBrick },
+                    ));
+                }
+            }
+            b = b.with_entity(voxel_entity(x as f32, wall_h as f32, z as f32, Block::Plank));
+        }
+    }
+    // Chimney: 1×3 tall stone-brick column in back-right corner
+    for y in 1..wall_h+3 {
+        b = b.with_entity(voxel_entity((w-2) as f32, y as f32, (w-2) as f32, Block::StoneBrick));
+    }
+    b = b.with_volume(PrefabVolume::solid(Aabb::new(
+        Vec3::new(0.0, 0.0, 0.0),
+        Vec3::new(w as f32, (wall_h + 1) as f32, w as f32),
+    )));
+    b = b.with_volume(PrefabVolume::hollow(Aabb::new(
+        Vec3::new(1.0, 1.0, 1.0),
+        Vec3::new((w-1) as f32, wall_h as f32, (w-1) as f32),
+    )));
+    b.build()
+}
+
+/// Village well: 3×3 stone-brick rim, hollow centre.
+fn make_well_prefab() -> Prefab {
+    let mut b = Prefab::builder("well");
+    for x in 0..3_i32 {
+        for z in 0..3_i32 {
+            if x == 1 && z == 1 {
+                // hollow centre — just put a stone floor 1 below ground
+                b = b.with_entity(voxel_entity(x as f32, -1.0, z as f32, Block::StoneBrick));
+            } else {
+                b = b.with_entity(voxel_entity(x as f32, 0.0, z as f32, Block::StoneBrick));
+                b = b.with_entity(voxel_entity(x as f32, 1.0, z as f32, Block::StoneBrick));
+            }
+        }
+    }
+    b = b.with_volume(PrefabVolume::solid(Aabb::new(
+        Vec3::new(0.0, -1.0, 0.0),
+        Vec3::new(3.0, 2.0, 3.0),
+    )));
+    b.build()
+}
+
+/// Ruined tower: 3×3 base, 8 blocks tall, blocks randomly missing (more gaps higher up).
+fn make_ruined_tower_prefab() -> Prefab {
+    let mut b = Prefab::builder("ruined_tower");
+    let size   = 3_i32;
+    let height = 8_i32;
+
+    for y in 0..height {
+        for x in 0..size {
+            for z in 0..size {
+                let is_wall = x == 0 || x == size-1 || z == 0 || z == size-1;
+                let is_base = y == 0;
+                if !is_wall && !is_base { continue; }
+
+                // Ruin decay: probability of a block being absent increases with height
+                let decay_prob = ((y as f32 - 1.0) / height as f32 * 0.7).max(0.0);
+                if y > 1 && hash(x * 31 + y * 7, z * 13 + y * 11, 88) < decay_prob { continue; }
+
+                b = b.with_entity(voxel_entity(x as f32, y as f32, z as f32, Block::StoneBrick));
+            }
+        }
+    }
+    b = b.with_volume(PrefabVolume::solid(Aabb::new(
+        Vec3::new(0.0, 0.0, 0.0),
+        Vec3::new(size as f32, height as f32, size as f32),
+    )));
+    b.build()
+}
+
+// ── Placement helpers ─────────────────────────────────────────────────────────
+
+/// Append world-space `EntityRecord`s for all entities in `prefab` placed at `world_pos`.
+fn emit_prefab_entities(
+    prefab:    &Prefab,
+    world_pos: Vec3,
+    entities:  &mut Vec<EntityRecord>,
+    eid:       &mut u64,
+) {
+    for template in &prefab.entities {
+        let Some(ref lt) = template.transform else { continue };
+        let wp = lt.position + world_pos;
+        *eid += 1;
+        entities.push(EntityRecord {
+            id:              *eid,
+            transform:       Some(TransformRecord {
+                position: wp.to_array(),
+                rotation: [0.0, 0.0, 0.0, 1.0],
+                scale:    [1.0, 1.0, 1.0],
+            }),
+            mesh:            None,
+            material:        template.material.map(|m| m.0),
+            light:           None,
+            billboard:       None,
+            bounding_radius: 0.866,
+            tags:            vec![],
+        });
+    }
+}
+
+// ── Structure placement ───────────────────────────────────────────────────────
+
+/// Place trees across a chunk using a regular grid + biome noise filter.
+///
+/// Trees only appear in forest zones (forest_noise > FOREST_THRESHOLD) and
+/// where individual spot noise exceeds a density-dependent threshold — creating
+/// dense interiors and sparse forest edges, with wide open plains in between.
+fn place_trees_in_chunk(
+    ox: i32, oz: i32,
+    entities: &mut Vec<EntityRecord>, eid: &mut u64,
+    tree: &Prefab, tall_tree: &Prefab,
+    ctx: &mut PlacementContext,
+) {
+    use stratum::{Level, LevelId};
+    let mut scratch = Level::new(LevelId::new(0), "scratch", 32.0, 10000.0);
+
+    let mut gx = ox;
+    while gx < ox + VOXELS_PER_CHUNK {
+        let mut gz = oz;
+        while gz < oz + VOXELS_PER_CHUNK {
+            let forest = forest_noise_at(gx as f32, gz as f32);
+            if forest > FOREST_THRESHOLD {
+                let spot = tree_spot_noise(gx as f32, gz as f32);
+                // In denser forest zones the threshold is lower → more trees.
+                let threshold = FOREST_TREE_SPOT_MIN - (forest - FOREST_THRESHOLD) * 0.35;
+                if spot > threshold {
+                    let h = terrain_height(gx, gz);
+                    if h >= BASE_HEIGHT && h <= STRUCTURE_HEIGHT_CUTOFF {
+                        let world_pos = Vec3::new(gx as f32, h as f32 + 1.0, gz as f32);
+                        // Pine trees appear occasionally for variety
+                        let use_pine = hash(gx, gz, 55) < 0.25;
+                        let chosen   = if use_pine { tall_tree } else { tree };
+                        if ctx.place(chosen, world_pos, &mut scratch).is_ok() {
+                            emit_prefab_entities(chosen, world_pos, entities, eid);
+                        }
+                    }
+                }
+            }
+            gz += TREE_GRID_STEP;
+        }
+        gx += TREE_GRID_STEP;
+    }
+}
+
+/// Place a ruined tower at a deterministic position within the chunk, if conditions allow.
+fn place_tower_in_chunk(
+    ox: i32, oz: i32,
+    chunk_x: i32, chunk_z: i32,
+    entities: &mut Vec<EntityRecord>, eid: &mut u64,
+    tower: &Prefab,
+    ctx: &mut PlacementContext,
+) {
+    use stratum::{Level, LevelId};
+    let mut scratch = Level::new(LevelId::new(0), "scratch", 32.0, 10000.0);
+
+    // Don't put towers in forests or near villages
+    if is_forest_zone(ox + VOXELS_PER_CHUNK / 2, oz + VOXELS_PER_CHUNK / 2) { return; }
+    if village_center_near(chunk_x, chunk_z).is_some() { return; }
+
+    let fx = 3.0 + hash(chunk_x, chunk_z, 81) * (VOXELS_PER_CHUNK as f32 - 6.0);
+    let fz = 3.0 + hash(chunk_x, chunk_z, 82) * (VOXELS_PER_CHUNK as f32 - 6.0);
+    let wx = ox + fx as i32;
+    let wz = oz + fz as i32;
+    let h  = terrain_height(wx, wz);
+    if h < BASE_HEIGHT + 1 || h > STRUCTURE_HEIGHT_CUTOFF { return; }
+
+    let world_pos = Vec3::new(wx as f32, h as f32 + 1.0, wz as f32);
+    if ctx.place(tower, world_pos, &mut scratch).is_ok() {
+        emit_prefab_entities(tower, world_pos, entities, eid);
+    }
+}
+
+/// Place village structures for a chunk that is within a village's radius.
+///
+/// The full set of house positions is deterministically computed from the village
+/// center; only those whose base falls inside this chunk's XZ bounds are emitted.
+/// The well is placed by the chunk that contains the village center.
+fn place_village_structures(
+    chunk_coord:   ChunkCoord,
+    village_center: (i32, i32),
+    entities:      &mut Vec<EntityRecord>,
+    eid:           &mut u64,
+    house:         &Prefab,
+    large_house:   &Prefab,
+    well:          &Prefab,
+    ctx:           &mut PlacementContext,
+) {
+    use stratum::{Level, LevelId};
+    let mut scratch = Level::new(LevelId::new(0), "scratch", 32.0, 10000.0);
+
+    let (vcx, vcz) = village_center;
+    // Village world-space center (middle of the center chunk)
+    let vcwx = vcx * VOXELS_PER_CHUNK + VOXELS_PER_CHUNK / 2;
+    let vcwz = vcz * VOXELS_PER_CHUNK + VOXELS_PER_CHUNK / 2;
+
+    // Reject village placement on mountainous or very uneven terrain
+    let center_h = terrain_height(vcwx, vcwz);
+    if center_h > STRUCTURE_HEIGHT_CUTOFF { return; }
+
+    let ox = chunk_coord.x * VOXELS_PER_CHUNK;
+    let oz = chunk_coord.z * VOXELS_PER_CHUNK;
+
+    // Well — placed only from the center chunk
+    if chunk_coord.x == vcx && chunk_coord.z == vcz {
+        let wp = Vec3::new(vcwx as f32 - 1.0, center_h as f32 + 1.0, vcwz as f32 - 1.0);
+        if ctx.place(well, wp, &mut scratch).is_ok() {
+            emit_prefab_entities(well, wp, entities, eid);
+        }
+    }
+
+    // Houses — deterministic set from village center, emitted per-chunk
+    let house_count = VILLAGE_HOUSE_MIN
+        + (hash(vcx, vcz, 55) * (VILLAGE_HOUSE_MAX - VILLAGE_HOUSE_MIN) as f32) as usize;
+
+    for i in 0..house_count {
+        let angle  = hash(vcx + i as i32, vcz,          60 + i as u64) * std::f32::consts::TAU;
+        let radius = 8.0 + hash(vcx, vcz + i as i32,    70 + i as u64) * 22.0;
+        let hwx_f  = vcwx as f32 + angle.cos() * radius;
+        let hwz_f  = vcwz as f32 + angle.sin() * radius;
+        let hwx    = hwx_f as i32;
+        let hwz    = hwz_f as i32;
+
+        // Only emit from the chunk that contains this house's origin
+        if hwx < ox || hwx >= ox + VOXELS_PER_CHUNK { continue; }
+        if hwz < oz || hwz >= oz + VOXELS_PER_CHUNK { continue; }
+
+        let h = terrain_height(hwx + 3, hwz + 3);
+        if h > STRUCTURE_HEIGHT_CUTOFF { continue; }
+        let world_pos = Vec3::new(hwx_f, h as f32 + 1.0, hwz_f);
+
+        // Alternate between house sizes based on index
+        let chosen = if i % 5 == 0 { large_house } else { house };
+        if ctx.place(chosen, world_pos, &mut scratch).is_ok() {
+            emit_prefab_entities(chosen, world_pos, entities, eid);
+        }
+    }
 }
 
 // ── Chunk data generation ─────────────────────────────────────────────────────
 //
 // The ChunkFile stores one EntityRecord per voxel. Each record contains:
 //   - transform.position  → world-space voxel centre
-//   - material            → Block discriminant (1=grass, 2=dirt, 3=stone)
+//   - material            → Block discriminant index
 // Mesh handles are NOT stored — they are built at load time from geometry.
+//
+// Multi-Y support: terrain heights can exceed 16 m (mountains), so chunks at
+// coord.y = 1 and coord.y = 2 also receive terrain blocks.
+// Structures (trees, buildings) are only emitted from coord.y == 0 chunks,
+// since their bases are always on ground level (≤ STRUCTURE_HEIGHT_CUTOFF).
 
 fn build_chunk_file(coord: ChunkCoord) -> ChunkFile {
-    if coord.y != 0 {
-        return ChunkFile { version: FORMAT_VERSION, coord: [coord.x, coord.y, coord.z], entities: vec![] };
-    }
+    let empty = || ChunkFile {
+        version:          FORMAT_VERSION,
+        coord:            [coord.x, coord.y, coord.z],
+        entities:         vec![],
+        prefab_instances: vec![],
+    };
 
-    let ox = coord.x * VOXELS_PER_CHUNK;
-    let oz = coord.z * VOXELS_PER_CHUNK;
+    if coord.y < 0 || coord.y >= MAX_Y_CHUNKS { return empty(); }
+
+    let wy_min = coord.y * VOXELS_PER_CHUNK;      // inclusive
+    let wy_max = wy_min + VOXELS_PER_CHUNK;        // exclusive
+    let ox     = coord.x * VOXELS_PER_CHUNK;
+    let oz     = coord.z * VOXELS_PER_CHUNK;
+
     let mut entities = Vec::new();
     let mut eid: u64 = 0;
 
+    // ── Terrain voxels ──────────────────────────────────────────────────────
     for lx in 0..VOXELS_PER_CHUNK {
         for lz in 0..VOXELS_PER_CHUNK {
             let wx = ox + lx;
             let wz = oz + lz;
-            let h  = terrain_height(wx, wz).min(VOXELS_PER_CHUNK - 1);
-            for wy in 0..=h {
-                let block = block_type(wx, wy, wz);
+            let surface_h = terrain_height(wx, wz);
+
+            // Emit only the blocks that land in this chunk's Y range
+            let y_lo = wy_min;
+            let y_hi = wy_max.min(surface_h + 1); // exclusive upper bound
+            for wy in y_lo..y_hi {
+                let block = block_type(wy, surface_h);
                 eid += 1;
                 entities.push(EntityRecord {
                     id: eid,
@@ -161,7 +659,45 @@ fn build_chunk_file(coord: ChunkCoord) -> ChunkFile {
         }
     }
 
-    ChunkFile { version: FORMAT_VERSION, coord: [coord.x, coord.y, coord.z], entities }
+    // ── Structures (only placed from y=0 chunks) ─────────────────────────────
+    if coord.y == 0 {
+        let tree       = make_tree_prefab();
+        let tall_tree  = make_tall_tree_prefab();
+        let house      = make_house_prefab();
+        let large_house = make_large_house_prefab();
+        let well       = make_well_prefab();
+        let tower      = make_ruined_tower_prefab();
+        let mut ctx    = PlacementContext::new();
+
+        if let Some(vc) = village_center_near(coord.x, coord.z) {
+            place_village_structures(
+                coord, vc,
+                &mut entities, &mut eid,
+                &house, &large_house, &well,
+                &mut ctx,
+            );
+        } else if hash(coord.x, coord.z, 88) < TOWER_PROBABILITY {
+            place_tower_in_chunk(
+                ox, oz, coord.x, coord.z,
+                &mut entities, &mut eid,
+                &tower, &mut ctx,
+            );
+        } else {
+            place_trees_in_chunk(
+                ox, oz,
+                &mut entities, &mut eid,
+                &tree, &tall_tree,
+                &mut ctx,
+            );
+        }
+    }
+
+    ChunkFile {
+        version:          FORMAT_VERSION,
+        coord:            [coord.x, coord.y, coord.z],
+        entities,
+        prefab_instances: vec![],
+    }
 }
 
 // ── Chunk mesh builder ────────────────────────────────────────────────────────
@@ -171,11 +707,16 @@ fn build_chunk_file(coord: ChunkCoord) -> ChunkFile {
 // Returns one Vec<(vertices, indices)> per distinct Block type.
 
 fn build_chunk_mesh(
-    device:    &wgpu::Device,
-    chunk:     ChunkFile,
-    mat_grass: MaterialHandle,
-    mat_dirt:  MaterialHandle,
-    mat_stone: MaterialHandle,
+    device:          &wgpu::Device,
+    chunk:           ChunkFile,
+    mat_grass:       MaterialHandle,
+    mat_dirt:        MaterialHandle,
+    mat_stone:       MaterialHandle,
+    mat_wood:        MaterialHandle,
+    mat_leaves:      MaterialHandle,
+    mat_stone_brick: MaterialHandle,
+    mat_plank:       MaterialHandle,
+    mat_glass:       MaterialHandle,
 ) -> Vec<(GpuMesh, MaterialHandle)> {
     // Collect solid voxels keyed by their integer min-corner (floor of centre).
     let mut solid: HashMap<(i32,i32,i32), Block> = HashMap::new();
@@ -239,7 +780,16 @@ fn build_chunk_mesh(
         }
     }
 
-    let mat_of = |b: Block| match b { Block::Grass => mat_grass, Block::Dirt => mat_dirt, Block::Stone => mat_stone };
+    let mat_of = |b: Block| match b {
+        Block::Grass      => mat_grass,
+        Block::Dirt       => mat_dirt,
+        Block::Stone      => mat_stone,
+        Block::Wood       => mat_wood,
+        Block::Leaves     => mat_leaves,
+        Block::StoneBrick => mat_stone_brick,
+        Block::Plank      => mat_plank,
+        Block::Glass      => mat_glass,
+    };
     let mut result = Vec::new();
     for (block, v) in verts {
         if v.is_empty() { continue; }
@@ -260,21 +810,36 @@ struct VoxelChunkManager {
     dir:        PathBuf,
     /// Chunks resident in the live `Level`: coord → (entity IDs, mesh handles to free).
     pub loaded: HashMap<ChunkCoord, (Vec<EntityId>, Vec<MeshHandle>)>,
-    in_flight:  HashSet<ChunkCoord>,
-    grass_mat:  MaterialHandle,
-    dirt_mat:   MaterialHandle,
-    stone_mat:  MaterialHandle,
+    in_flight:       HashSet<ChunkCoord>,
+    grass_mat:       MaterialHandle,
+    dirt_mat:        MaterialHandle,
+    stone_mat:       MaterialHandle,
+    wood_mat:        MaterialHandle,
+    leaves_mat:      MaterialHandle,
+    stone_brick_mat: MaterialHandle,
+    plank_mat:       MaterialHandle,
+    glass_mat:       MaterialHandle,
     pending_ready: Vec<StreamEvent>,
 }
 
 impl VoxelChunkManager {
+    #[allow(clippy::too_many_arguments)]
     fn new(
-        dir:       PathBuf,
-        grass_mat: MaterialHandle,
-        dirt_mat:  MaterialHandle,
-        stone_mat: MaterialHandle,
+        dir:             PathBuf,
+        grass_mat:       MaterialHandle,
+        dirt_mat:        MaterialHandle,
+        stone_mat:       MaterialHandle,
+        wood_mat:        MaterialHandle,
+        leaves_mat:      MaterialHandle,
+        stone_brick_mat: MaterialHandle,
+        plank_mat:       MaterialHandle,
+        glass_mat:       MaterialHandle,
     ) -> Self {
-        Self { dir, grass_mat, dirt_mat, stone_mat, loaded: HashMap::new(), in_flight: HashSet::new(), pending_ready: Vec::new() }
+        Self {
+            dir, grass_mat, dirt_mat, stone_mat,
+            wood_mat, leaves_mat, stone_brick_mat, plank_mat, glass_mat,
+            loaded: HashMap::new(), in_flight: HashSet::new(), pending_ready: Vec::new(),
+        }
     }
 
     fn desired_set(&self, cam: Vec3) -> HashSet<ChunkCoord> {
@@ -283,7 +848,9 @@ impl VoxelChunkManager {
         let mut set = HashSet::new();
         for dx in -LOAD_RADIUS..=LOAD_RADIUS {
             for dz in -LOAD_RADIUS..=LOAD_RADIUS {
-                set.insert(ChunkCoord::new(cx + dx, 0, cz + dz));
+                for y in 0..MAX_Y_CHUNKS {
+                    set.insert(ChunkCoord::new(cx + dx, y, cz + dz));
+                }
             }
         }
         set
@@ -341,7 +908,12 @@ impl VoxelChunkManager {
             match event {
                 StreamEvent::ChunkReady { coord, data } => {
                     self.in_flight.remove(&coord);
-                    let submeshes = build_chunk_mesh(device, data, self.grass_mat, self.dirt_mat, self.stone_mat);
+                    let submeshes = build_chunk_mesh(
+                        device, data,
+                        self.grass_mat, self.dirt_mat, self.stone_mat,
+                        self.wood_mat, self.leaves_mat, self.stone_brick_mat,
+                        self.plank_mat, self.glass_mat,
+                    );
                     let cx = coord.x as f32 * CHUNK_SIZE + CHUNK_SIZE * 0.5;
                     let cz = coord.z as f32 * CHUNK_SIZE + CHUNK_SIZE * 0.5;
                     let chunk_centre = Vec3::new(cx, CHUNK_SIZE * 0.5, cz);
@@ -357,7 +929,7 @@ impl VoxelChunkManager {
                                 .with_transform(Transform::from_position(chunk_centre))
                                 .with_mesh(mesh_h)
                                 .with_material(mat)
-                                .with_bounding_radius(CHUNK_SIZE * 1.5),
+                                .with_bounding_radius(CHUNK_SIZE * 2.5),
                         ));
                     }
 
@@ -482,26 +1054,23 @@ impl ApplicationHandler for App {
 
         let mut integration = HelioIntegration::new(renderer, AssetRegistry::new());
 
-        // Three solid-colour PBR materials — one per block type.
+        // PBR materials — one per block type.
         // Chunk meshes are built at load time; only material handles are stored here.
-        let grass_mat = {
+        let make_mat = |integration: &mut HelioIntegration, color: [f32; 4], roughness: f32| {
             let g = integration.create_material(
-                &Material::new().with_base_color([0.24, 0.55, 0.16, 1.0]).with_roughness(0.9),
+                &Material::new().with_base_color(color).with_roughness(roughness),
             );
             integration.assets_mut().add_material(g)
         };
-        let dirt_mat = {
-            let g = integration.create_material(
-                &Material::new().with_base_color([0.47, 0.30, 0.14, 1.0]).with_roughness(1.0),
-            );
-            integration.assets_mut().add_material(g)
-        };
-        let stone_mat = {
-            let g = integration.create_material(
-                &Material::new().with_base_color([0.50, 0.50, 0.50, 1.0]).with_roughness(0.85),
-            );
-            integration.assets_mut().add_material(g)
-        };
+
+        let grass_mat       = make_mat(&mut integration, [0.24, 0.55, 0.16, 1.0], 0.90);
+        let dirt_mat        = make_mat(&mut integration, [0.47, 0.30, 0.14, 1.0], 1.00);
+        let stone_mat       = make_mat(&mut integration, [0.50, 0.50, 0.50, 1.0], 0.85);
+        let wood_mat        = make_mat(&mut integration, [0.40, 0.25, 0.10, 1.0], 0.80);
+        let leaves_mat      = make_mat(&mut integration, [0.15, 0.45, 0.10, 1.0], 0.95);
+        let stone_brick_mat = make_mat(&mut integration, [0.55, 0.52, 0.48, 1.0], 0.80);
+        let plank_mat       = make_mat(&mut integration, [0.62, 0.45, 0.22, 1.0], 0.75);
+        let glass_mat       = make_mat(&mut integration, [0.60, 0.80, 0.90, 0.5], 0.10);
 
         let mut stratum  = Stratum::new(SimulationMode::Editor);
         let level_id     = stratum.create_level("voxel_world", CHUNK_SIZE, ACTIVATION_RADIUS);
@@ -525,7 +1094,7 @@ impl ApplicationHandler for App {
         let main_cam_id = stratum.register_camera(StratumCamera {
             id:            CameraId::PLACEHOLDER,
             kind:          CameraKind::EditorPerspective,
-            position:      Vec3::new(4.0, 14.0, -12.0),
+            position:      Vec3::new(4.0, 50.0, -12.0),
             yaw:           0.0,
             pitch:         -0.35,
             projection:    Projection::perspective(std::f32::consts::FRAC_PI_3, 0.1, 1000.0),
@@ -537,7 +1106,9 @@ impl ApplicationHandler for App {
 
         let streamer = LevelStreamer::new();
         let chunks   = VoxelChunkManager::new(
-            level_dir(), grass_mat, dirt_mat, stone_mat,
+            level_dir(),
+            grass_mat, dirt_mat, stone_mat,
+            wood_mat, leaves_mat, stone_brick_mat, plank_mat, glass_mat,
         );
 
         self.state = Some(AppState {

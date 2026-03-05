@@ -98,9 +98,10 @@ pub fn save_level(level: &Level, level_dir: &Path) -> Result<(), LevelFsError> {
             .collect();
 
         let chunk_file = ChunkFile {
-            version:  FORMAT_VERSION,
-            coord:    [coord.x, coord.y, coord.z],
-            entities: entity_records.clone(),
+            version:          FORMAT_VERSION,
+            coord:            [coord.x, coord.y, coord.z],
+            entities:         entity_records.clone(),
+            prefab_instances: Vec::new(),
         };
 
         write_json(&chunk_file_path(level_dir, coord), &chunk_file)?;
@@ -233,30 +234,8 @@ pub fn chunk_to_components(chunk: ChunkFile) -> Vec<(EntityId, Components)> {
         .entities
         .into_iter()
         .map(|rec| {
-            let id  = EntityId::new(rec.id);
-            let mut c = Components::new();
-
-            if let Some(t) = rec.transform {
-                c = c.with_transform(Transform {
-                    position: Vec3::from_array(t.position),
-                    rotation: Quat::from_array(t.rotation),
-                    scale:    Vec3::from_array(t.scale),
-                });
-            }
-            if let Some(m) = rec.mesh     { c = c.with_mesh(MeshHandle(m)); }
-            if let Some(m) = rec.material { c = c.with_material(MaterialHandle(m)); }
-            if let Some(l) = rec.light    { c = c.with_light(light_from_record(l)); }
-            if let Some(b) = rec.billboard {
-                c = c.with_billboard(BillboardData {
-                    size:         b.size,
-                    color:        b.color,
-                    screen_scale: b.screen_scale,
-                });
-            }
-            c.bounding_radius = rec.bounding_radius;
-            for tag in rec.tags { c = c.with_tag(tag); }
-
-            (id, c)
+            let id = EntityId::new(rec.id);
+            (id, record_to_components(rec))
         })
         .collect()
 }
@@ -305,8 +284,13 @@ fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, LevelFsEr
 }
 
 fn entity_to_record(id: EntityId, c: &Components) -> EntityRecord {
+    entity_to_record_pub(id.raw(), c)
+}
+
+/// Public-to-the-module version of `entity_to_record` used by `prefab_io`.
+pub(super) fn entity_to_record_pub(id: u64, c: &Components) -> EntityRecord {
     EntityRecord {
-        id:              id.raw(),
+        id,
         transform:       c.transform.as_ref().map(transform_to_record),
         mesh:            c.mesh.map(|m| m.0),
         material:        c.material.map(|m| m.0),
@@ -315,6 +299,33 @@ fn entity_to_record(id: EntityId, c: &Components) -> EntityRecord {
         bounding_radius: c.bounding_radius,
         tags:            c.tags.clone(),
     }
+}
+
+/// Deserialise a single [`EntityRecord`] into a [`Components`] bag.
+///
+/// Used by `prefab_io` to convert stored prefab entities back to runtime data.
+pub(super) fn record_to_components(rec: EntityRecord) -> Components {
+    let mut c = Components::new();
+    if let Some(t) = rec.transform {
+        c = c.with_transform(Transform {
+            position: Vec3::from_array(t.position),
+            rotation: Quat::from_array(t.rotation),
+            scale:    Vec3::from_array(t.scale),
+        });
+    }
+    if let Some(m) = rec.mesh     { c = c.with_mesh(MeshHandle(m)); }
+    if let Some(m) = rec.material { c = c.with_material(MaterialHandle(m)); }
+    if let Some(l) = rec.light    { c = c.with_light(light_from_record(l)); }
+    if let Some(b) = rec.billboard {
+        c = c.with_billboard(BillboardData {
+            size:         b.size,
+            color:        b.color,
+            screen_scale: b.screen_scale,
+        });
+    }
+    c.bounding_radius = rec.bounding_radius;
+    for tag in rec.tags { c = c.with_tag(tag); }
+    c
 }
 
 fn transform_to_record(t: &Transform) -> TransformRecord {
