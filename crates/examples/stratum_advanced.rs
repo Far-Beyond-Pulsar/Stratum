@@ -9,7 +9,6 @@
 //! * **Editor / Game mode** — Tab toggles; only matching cameras render
 //! * **Animated lights with billboards** — 12 orbiting point lights (3 per zone)
 //!   each carry both `LightData` and `BillboardData` components
-//! * **Sun directional light** — always-visible global illumination
 //!
 //! ## Controls
 //!
@@ -22,6 +21,7 @@
 //! | F1               | Main perspective camera (Game mode)           |
 //! | F2               | Top-down overview camera (Game mode)          |
 //! | F3               | Print partition + entity debug stats          |
+//! | P                | Toggle world-partition chunk AABB wireframes  |
 //! | 1 / 2            | Single fullscreen view / 4-up multiview       |
 //! | Escape           | Release cursor (or exit if cursor is free)    |
 //!
@@ -411,6 +411,9 @@ struct AppState {
     keys:             HashSet<KeyCode>,
     cursor_grabbed:   bool,
     mouse_delta:      (f32, f32),
+
+    // ── Debug overlays ────────────────────────────────────────────────────────
+    show_partition_debug: bool,
 }
 
 // ── ApplicationHandler ────────────────────────────────────────────────────────
@@ -637,20 +640,6 @@ impl ApplicationHandler for App {
             );
         }
 
-        // ── Sun — always-visible directional light ────────────────────────────
-        // Spawned at the world centre (chunk 1,0,1). Directional lights always
-        // pass frustum culling, so this is just for partition tracking.
-        level.spawn_entity(
-            Components::new()
-                .with_transform(Transform::from_position(Vec3::new(45.0, 50.0, 45.0)))
-                .with_light(LightData::Directional {
-                    direction: [-0.4, -1.0, -0.3],
-                    color:     [1.0, 0.95, 0.85],
-                    intensity: 2.5,
-                })
-                .with_tag("sun"),
-        );
-
         // ── Orbiting lights with billboards ───────────────────────────────────
         //
         // Each light entity carries:
@@ -852,6 +841,7 @@ impl ApplicationHandler for App {
             keys:           HashSet::new(),
             cursor_grabbed: false,
             mouse_delta:    (0.0, 0.0),
+            show_partition_debug: true,
         });
     }
 
@@ -955,6 +945,7 @@ impl ApplicationHandler for App {
                     match key {
                         KeyCode::Digit1 => state.set_multiview(false),
                         KeyCode::Digit2 => state.set_multiview(true),
+                        KeyCode::KeyP   => state.show_partition_debug = !state.show_partition_debug,
                         _ => {}
                     }
                 }
@@ -1131,6 +1122,10 @@ impl AppState {
         // ── 6. Submit to Helio ────────────────────────────────────────────────
         let level = self.stratum.active_level()
             .expect("active level exists when views are produced");
+
+        if self.show_partition_debug {
+            self.integration.debug_draw_world_partition(level.partition());
+        }
 
         if let Err(e) = self.integration.submit_frame(&views, level, &surface_view, dt) {
             log::error!("Render error: {e:?}");

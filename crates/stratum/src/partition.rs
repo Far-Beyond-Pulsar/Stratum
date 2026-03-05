@@ -149,6 +149,19 @@ impl WorldPartition {
             .collect()
     }
 
+    /// Collect every entity ID from **all** chunks regardless of streaming state.
+    ///
+    /// Used to ensure lights (and other entities with influence that extends
+    /// beyond their containing chunk) are never silently dropped from a
+    /// render view just because their chunk is outside the activation radius.
+    /// Frustum culling handles the final visibility decision.
+    pub fn all_entities(&self) -> Vec<EntityId> {
+        self.chunks
+            .values()
+            .flat_map(|c| c.entities.iter().copied())
+            .collect()
+    }
+
     pub fn chunks(&self) -> impl Iterator<Item = &Chunk> {
         self.chunks.values()
     }
@@ -280,6 +293,23 @@ mod tests {
         let active = wp.active_entities();
         assert!(active.contains(&id_active));
         assert!(!active.contains(&id_inactive));
+    }
+
+    #[test]
+    fn all_entities_includes_inactive_chunks() {
+        let mut wp = make_partition();
+        let id_active   = EntityId::new(1);
+        let id_inactive = EntityId::new(2);
+        wp.place_entity(id_active,   Vec3::new(0.0, 0.0, 0.0));
+        wp.place_entity(id_inactive, Vec3::new(500.0, 0.0, 0.0));
+        // Only activate the first chunk
+        wp.get_or_create(ChunkCoord::new(0, 0, 0)).activate();
+        // active_entities skips the unloaded chunk
+        assert!(!wp.active_entities().contains(&id_inactive));
+        // all_entities includes both
+        let all = wp.all_entities();
+        assert!(all.contains(&id_active));
+        assert!(all.contains(&id_inactive));
     }
 
     #[test]

@@ -114,11 +114,8 @@ fn stratum_light_to_scene_light(light: &LightData, position: [f32; 3]) -> SceneL
             SceneLight::directional(*direction, *color, *intensity)
         }
 
-        // Helio's public SceneLight API currently has point + directional.
-        // Spot lights map to point as a compatible fallback until Helio
-        // exposes a spot constructor.
-        LightData::Spot { color, intensity, range, .. } => {
-            SceneLight::point(position, *color, *intensity, *range)
+        LightData::Spot { direction, color, intensity, range, inner_angle, outer_angle } => {
+            SceneLight::spot(position, *direction, *color, *intensity, *range, *inner_angle, *outer_angle)
         }
     }
 }

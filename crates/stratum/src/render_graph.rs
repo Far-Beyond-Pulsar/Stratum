@@ -40,6 +40,15 @@ fn camera_active_in_mode(mode: &SimulationMode, kind: &CameraKind) -> bool {
 /// | `time`          | Elapsed time in seconds (forwarded to shaders)        |
 ///
 /// Returns views sorted by `priority` (ascending, lower = renders first).
+///
+/// # Candidate strategy
+///
+/// Geometry (meshes, billboards) is sourced only from **active** chunks so
+/// that unloaded/loading geometry stays invisible. Lights are sourced from
+/// **all** chunks because a point/spot light's influence radius (`range`) can
+/// reach well into neighbouring chunks — restricting lights to active chunks
+/// would silently black-out areas that are fully loaded and visible.
+/// Frustum culling handles the final visibility decision for both.
 pub fn build_render_views(
     mode:          &SimulationMode,
     cameras:       &CameraRegistry,
@@ -48,9 +57,32 @@ pub fn build_render_views(
     window_height: u32,
     time:          f32,
 ) -> Vec<RenderView> {
-    // Resident entity candidates (from active partition chunks).
+    let store = level.entities();
+
+    // Geometry candidates: active chunks only (respects streaming state).
     let active_entities = level.partition().active_entities();
-    let store           = level.entities();
+
+    // Light candidates: all chunks — a light's range can span chunk boundaries.
+    // Build a deduplicated union: start with active entities, then append any
+    // light-only entities from inactive chunks that aren't already included.
+    let all_entities = level.partition().all_entities();
+    let active_set: std::collections::HashSet<_> = active_entities.iter().copied().collect();
+    let light_candidates: Vec<_> = all_entities
+        .into_iter()
+        .filter(|id| {
+            // Already covered by active set — skip to avoid duplicates.
+            if active_set.contains(id) { return false; }
+            // Include only if this entity is a light (meshes stay partition-gated).
+            store.get(*id).map(|c| c.light.is_some()).unwrap_or(false)
+        })
+        .collect();
+
+    // Full candidate list: active geometry + out-of-range lights.
+    let candidates: Vec<_> = active_entities
+        .iter()
+        .copied()
+        .chain(light_candidates)
+        .collect();
 
     let mut views: Vec<RenderView> = cameras
         .active_cameras()
@@ -59,7 +91,7 @@ pub fn build_render_views(
             let aspect    = cam.viewport.aspect(window_width, window_height);
             let view_proj = cam.view_proj(aspect);
             let frustum   = Frustum::from_view_proj(&view_proj);
-            let visible   = visibility_cull(&active_entities, store, &frustum);
+            let visible   = visibility_cull(&candidates, store, &frustum);
 
             log::trace!(
                 "Camera {:?} → {} visible entities",

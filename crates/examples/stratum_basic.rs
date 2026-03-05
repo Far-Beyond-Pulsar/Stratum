@@ -22,6 +22,7 @@
 //!   Escape      — release cursor / exit
 //!   Tab         — toggle Editor ↔ Game mode (editor cameras hidden in Game)
 //!   1 / 2       — single fullscreen view / 4-up multiview (top / side / front)
+//!   P           — toggle world-partition debug overlay (chunk AABB wireframes)
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -422,6 +423,9 @@ struct AppState {
     keys:           HashSet<KeyCode>,
     cursor_grabbed: bool,
     mouse_delta:    (f32, f32),
+
+    // ── Debug overlays ────────────────────────────────────────────────────────
+    show_partition_debug: bool,
 }
 
 // ── ApplicationHandler ────────────────────────────────────────────────────────
@@ -714,6 +718,7 @@ impl ApplicationHandler for App {
             keys:           HashSet::new(),
             cursor_grabbed: false,
             mouse_delta:    (0.0, 0.0),
+            show_partition_debug: true,
         });
     }
 
@@ -782,6 +787,7 @@ impl ApplicationHandler for App {
                     match key {
                         KeyCode::Digit1 => state.set_multiview(false),
                         KeyCode::Digit2 => state.set_multiview(true),
+                        KeyCode::KeyP   => state.show_partition_debug = !state.show_partition_debug,
                         _ => {}
                     }
                 }
@@ -1015,6 +1021,11 @@ impl AppState {
         //                `self.integration` is a distinct field — borrow-safe.
         let level = self.stratum.active_level()
             .expect("active level must exist when there are render views");
+
+        // ── World-partition debug overlay (toggle with P) ─────────────────────
+        if self.show_partition_debug {
+            self.integration.debug_draw_world_partition(level.partition());
+        }
 
         if let Err(e) = self.integration.submit_frame(
             &views, level, &surface_view, dt,

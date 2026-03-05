@@ -20,7 +20,8 @@
 
 use std::collections::HashMap;
 
-use stratum::{Level, RenderTargetHandle, RenderView};
+use glam::Quat;
+use stratum::{ChunkState, Level, RenderTargetHandle, RenderView, WorldPartition};
 use helio_render_v2::Renderer;
 
 use crate::asset_registry::AssetRegistry;
@@ -77,6 +78,32 @@ impl HelioIntegration {
     /// Notify the renderer that the output surface was resized.
     pub fn resize(&mut self, width: u32, height: u32) {
         self.renderer.resize(width, height);
+    }
+
+    // ── Debug drawing ─────────────────────────────────────────────────────────
+
+    /// Submit debug wireframe boxes for every chunk in `partition`.
+    ///
+    /// Color-coding by [`ChunkState`]:
+    /// * **Active**    — green  (`[0.0, 1.0, 0.0, 0.4]`)
+    /// * **Loading**   — yellow (`[1.0, 1.0, 0.0, 0.4]`)
+    /// * **Unloading** — orange (`[1.0, 0.5, 0.0, 0.3]`)
+    /// * **Unloaded**  — gray   (`[0.5, 0.5, 0.5, 0.15]`)
+    ///
+    /// Call this after `submit_frame` (or before — shapes are transient and
+    /// cleared automatically by the renderer after each render call).
+    pub fn debug_draw_world_partition(&mut self, partition: &WorldPartition) {
+        for chunk in partition.chunks() {
+            let center       = chunk.bounds.center();
+            let half_extents = chunk.bounds.half_extents();
+            let color = match chunk.state {
+                ChunkState::Active    => [0.0, 1.0, 0.0, 0.4],
+                ChunkState::Loading   => [1.0, 1.0, 0.0, 0.4],
+                ChunkState::Unloading => [1.0, 0.5, 0.0, 0.3],
+                ChunkState::Unloaded  => [0.5, 0.5, 0.5, 0.15],
+            };
+            self.renderer.debug_box(center, half_extents, Quat::IDENTITY, color, 0.03);
+        }
     }
 
     // ── Frame submission ──────────────────────────────────────────────────────
