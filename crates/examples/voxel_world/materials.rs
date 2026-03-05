@@ -1,9 +1,48 @@
-//! PBR material palette — one material per block type.
+//! PBR material palette — one material per block type with Faithful 64x textures.
 
 use stratum::MaterialHandle;
-use stratum_helio::{HelioIntegration, Material};
+use stratum_helio::{HelioIntegration, Material, TextureData};
 
 use crate::blocks::Block;
+
+// ── Texture loading ─────────────────────────────────────────────────────────
+
+fn load_block_texture(path: &str) -> (Vec<u8>, u32, u32) {
+    let asset_bytes: Option<&'static [u8]> = match path {
+        "grass_block_top.png"    => Some(include_bytes!("assets/block/grass_block_top.png")),
+        "dirt.png"               => Some(include_bytes!("assets/block/dirt.png")),
+        "stone.png"              => Some(include_bytes!("assets/block/stone.png")),
+        "oak_log.png"            => Some(include_bytes!("assets/block/oak_log.png")),
+        "oak_leaves.png"         => Some(include_bytes!("assets/block/oak_leaves.png")),
+        "stone_bricks.png"       => Some(include_bytes!("assets/block/stone_bricks.png")),
+        "oak_planks.png"         => Some(include_bytes!("assets/block/oak_planks.png")),
+        "glass.png"              => Some(include_bytes!("assets/block/glass.png")),
+        "sand.png"               => Some(include_bytes!("assets/block/sand.png")),
+        "sandstone_top.png"      => Some(include_bytes!("assets/block/sandstone_top.png")),
+        "snow.png"               => Some(include_bytes!("assets/block/snow.png")),
+        "ice.png"                => Some(include_bytes!("assets/block/ice.png")),
+        "dark_oak_log.png"       => Some(include_bytes!("assets/block/dark_oak_log.png")),
+        "dark_oak_leaves.png"    => Some(include_bytes!("assets/block/dark_oak_leaves.png")),
+        "clay.png"               => Some(include_bytes!("assets/block/clay.png")),
+        "cobblestone.png"        => Some(include_bytes!("assets/block/cobblestone.png")),
+        "mossy_cobblestone.png"  => Some(include_bytes!("assets/block/mossy_cobblestone.png")),
+        "cactus_side.png"        => Some(include_bytes!("assets/block/cactus_side.png")),
+        "hay_block_top.png"      => Some(include_bytes!("assets/block/hay_block_top.png")),
+        _ => None,
+    };
+
+    let img = asset_bytes
+        .and_then(|bytes| image::load_from_memory(bytes).ok())
+        .unwrap_or_else(|| {
+            log::warn!("Could not load texture '{}', using white fallback", path);
+            let mut px = image::RgbaImage::new(1, 1);
+            px.put_pixel(0, 0, image::Rgba([128, 128, 128, 255]));
+            image::DynamicImage::ImageRgba8(px)
+        })
+        .into_rgba8();
+    let (w, h) = img.dimensions();
+    (img.into_raw(), w, h)
+}
 
 /// Holds all GPU material handles, one per `Block` variant.
 pub struct MaterialPalette {
@@ -30,33 +69,49 @@ pub struct MaterialPalette {
 }
 
 impl MaterialPalette {
-    /// Create all materials and register them in the asset registry.
+    /// Create all materials with Faithful 64x textures and register them in the asset registry.
     pub fn new(integration: &mut HelioIntegration) -> Self {
-        let m = |int: &mut HelioIntegration, color: [f32; 4], roughness: f32| {
-            let g = int.create_material(&Material::new().with_base_color(color).with_roughness(roughness));
+        let m = |int: &mut HelioIntegration, tex_path: &str, roughness: f32| {
+            let (tex_rgba, w, h) = load_block_texture(tex_path);
+            let g = int.create_material(
+                &Material::new()
+                    .with_base_color_texture(TextureData::new(tex_rgba, w, h))
+                    .with_roughness(roughness),
+            );
+            int.assets_mut().add_material(g)
+        };
+        // Tinted material for grayscale textures (grass, leaves)
+        let m_tinted = |int: &mut HelioIntegration, tex_path: &str, roughness: f32, tint: [f32; 4]| {
+            let (tex_rgba, w, h) = load_block_texture(tex_path);
+            let g = int.create_material(
+                &Material::new()
+                    .with_base_color(tint)
+                    .with_base_color_texture(TextureData::new(tex_rgba, w, h))
+                    .with_roughness(roughness),
+            );
             int.assets_mut().add_material(g)
         };
         Self {
-            grass:       m(integration, [0.24, 0.55, 0.16, 1.0], 0.90),
-            dirt:        m(integration, [0.47, 0.30, 0.14, 1.0], 1.00),
-            stone:       m(integration, [0.50, 0.50, 0.50, 1.0], 0.85),
-            wood:        m(integration, [0.40, 0.25, 0.10, 1.0], 0.80),
-            leaves:      m(integration, [0.15, 0.45, 0.10, 1.0], 0.95),
-            stone_brick: m(integration, [0.55, 0.52, 0.48, 1.0], 0.80),
-            plank:       m(integration, [0.62, 0.45, 0.22, 1.0], 0.75),
-            glass:       m(integration, [0.60, 0.80, 0.90, 0.5], 0.10),
-            sand:        m(integration, [0.82, 0.75, 0.55, 1.0], 0.95),
-            sandstone:   m(integration, [0.78, 0.68, 0.45, 1.0], 0.85),
-            snow:        m(integration, [0.92, 0.93, 0.95, 1.0], 0.90),
-            ice:         m(integration, [0.70, 0.85, 0.95, 0.8], 0.05),
-            dark_wood:   m(integration, [0.25, 0.15, 0.08, 1.0], 0.80),
-            dark_leaves: m(integration, [0.08, 0.30, 0.05, 1.0], 0.95),
-            clay:        m(integration, [0.55, 0.42, 0.35, 1.0], 0.95),
-            cobblestone: m(integration, [0.45, 0.45, 0.42, 1.0], 0.90),
-            mossy_stone: m(integration, [0.35, 0.45, 0.30, 1.0], 0.90),
-            water:       m(integration, [0.15, 0.35, 0.60, 0.6], 0.05),
-            cactus:      m(integration, [0.18, 0.50, 0.12, 1.0], 0.85),
-            thatch:      m(integration, [0.72, 0.60, 0.30, 1.0], 0.95),
+            grass:       m_tinted(integration, "grass_block_top.png", 0.90, [0.52, 0.82, 0.35, 1.0]),
+            dirt:        m(integration, "dirt.png", 1.00),
+            stone:       m(integration, "stone.png", 0.85),
+            wood:        m(integration, "oak_log.png", 0.80),
+            leaves:      m_tinted(integration, "oak_leaves.png", 0.95, [0.48, 0.78, 0.32, 1.0]),
+            stone_brick: m(integration, "stone_bricks.png", 0.80),
+            plank:       m(integration, "oak_planks.png", 0.75),
+            glass:       m(integration, "glass.png", 0.10),
+            sand:        m(integration, "sand.png", 0.95),
+            sandstone:   m(integration, "sandstone_top.png", 0.85),
+            snow:        m(integration, "snow.png", 0.90),
+            ice:         m(integration, "ice.png", 0.05),
+            dark_wood:   m(integration, "dark_oak_log.png", 0.80),
+            dark_leaves: m_tinted(integration, "dark_oak_leaves.png", 0.95, [0.38, 0.68, 0.28, 1.0]),
+            clay:        m(integration, "clay.png", 0.95),
+            cobblestone: m(integration, "cobblestone.png", 0.90),
+            mossy_stone: m(integration, "mossy_cobblestone.png", 0.90),
+            water:       m(integration, "sand.png", 0.05),  // Fallback to sand for water
+            cactus:      m(integration, "cactus_side.png", 0.85),
+            thatch:      m(integration, "hay_block_top.png", 0.95),
         }
     }
 

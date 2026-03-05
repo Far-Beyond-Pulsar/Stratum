@@ -19,6 +19,7 @@ use crate::materials::MaterialPalette;
 use crate::prefabs::PrefabLibrary;
 use crate::terrain::*;
 use crate::generation;
+use crate::biomes::{self, Biome};
 
 /// Max new chunk requests sent to the streamer per frame.
 const MAX_REQUESTS_PER_FRAME: usize = 6;
@@ -161,6 +162,56 @@ impl VoxelChunkManager {
     }
 }
 
+// ── Procedural terrain regeneration ──────────────────────────────────────────
+
+/// Regenerate terrain voxels for a chunk from procedural noise functions.
+/// This is called when loading a chunk to avoid storing terrain as entities.
+fn regenerate_chunk_terrain(
+    solid: &mut HashMap<(i32, i32, i32), Block>,
+    coord: ChunkCoord,
+) {
+    let wy_min = coord.y * VOXELS_PER_CHUNK as i32;
+    let wy_max = wy_min + VOXELS_PER_CHUNK as i32;
+    let ox     = coord.x * VOXELS_PER_CHUNK as i32;
+    let oz     = coord.z * VOXELS_PER_CHUNK as i32;
+
+    if coord.y < 0 || coord.y >= MAX_Y_CHUNKS as i32 {
+        return; // Out of bounds
+    }
+
+    for lx in 0..VOXELS_PER_CHUNK as i32 {
+        for lz in 0..VOXELS_PER_CHUNK as i32 {
+            let wx = ox + lx;
+            let wz = oz + lz;
+            let surface_h = terrain_height(wx, wz);
+            let mf = mountain_factor(wx as f32, wz as f32);
+            let biome = biomes::biome_at(wx, wz, mf);
+
+            // Determine how high to fill (includes water above terrain)
+            let fill_top = if surface_h < WATER_LEVEL && biome != Biome::Desert {
+                WATER_LEVEL
+            } else {
+                surface_h
+            };
+
+            let y_lo = wy_min;
+            let y_hi = wy_max.min(fill_top + 1);
+
+            for wy in y_lo..y_hi {
+                let block = if wy <= surface_h {
+                    surface_block(wy, surface_h, biome)
+                } else if biome == Biome::Taiga && wy == WATER_LEVEL {
+                    Block::Ice
+                } else {
+                    Block::Water
+                };
+
+                solid.insert((wx, wy, wz), block);
+            }
+        }
+    }
+}
+
 // ── Face-culled mesh builder ────────────────────────────────────────────────
 
 fn build_chunk_mesh(
@@ -170,6 +221,18 @@ fn build_chunk_mesh(
 ) -> Vec<(GpuMesh, MaterialHandle)> {
     // Collect solid voxels keyed by their integer min-corner.
     let mut solid: HashMap<(i32, i32, i32), Block> = HashMap::new();
+
+    // ── Regenerate terrain procedurally ──────────────────────────────────────
+    // Chunks only store placed structures/entities. Terrain is regenerated from
+    // noise functions on load, eliminating ~95% of disk I/O.
+    let coord = ChunkCoord {
+        x: chunk.coord[0],
+        y: chunk.coord[1],
+        z: chunk.coord[2],
+    };
+    regenerate_chunk_terrain(&mut solid, coord);
+
+    // ── Add placed entities from disk ────────────────────────────────────────
     for rec in &chunk.entities {
         if let (Some(t), Some(m)) = (&rec.transform, rec.material) {
             if let Some(block) = Block::from_mat_index(m) {

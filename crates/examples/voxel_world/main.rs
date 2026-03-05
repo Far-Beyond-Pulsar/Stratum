@@ -21,6 +21,7 @@ mod camera;
 mod chunks;
 mod prefabs;
 mod generation;
+mod voxel_grid;
 mod app;
 
 fn main() {

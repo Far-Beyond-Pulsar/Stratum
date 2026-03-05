@@ -25,6 +25,8 @@
 
 </div>
 
+Textures for Voxel demo from https://faithfulpack.net 64x Java. Thanks guys you are the best!!
+
 ---
 
 ## Overview
