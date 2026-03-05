@@ -43,8 +43,8 @@ pub mod streaming;
 
 pub use format::LevelManifest;
 pub use io::{
-    chunk_to_components, load_chunk, load_manifest, load_sector_index, save_level,
-    sector_for, DEFAULT_BUCKET_SIZE,
+    chunk_to_components, discover_chunk_coords, load_chunk, load_manifest,
+    load_sector_index, save_level, sector_for, DEFAULT_BUCKET_SIZE,
 };
 pub use streaming::{LevelStreamer, StreamEvent};
 

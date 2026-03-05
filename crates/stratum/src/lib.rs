@@ -67,5 +67,5 @@ pub use visibility::Frustum;
 pub use level_fs::{
     LevelManifest, LevelStreamer, StreamEvent, LevelFsError,
     save_level, load_manifest, load_chunk, load_sector_index,
-    chunk_to_components,
+    chunk_to_components, discover_chunk_coords,
 };

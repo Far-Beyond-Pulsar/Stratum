@@ -82,6 +82,53 @@ impl AssetRegistry {
     pub fn remove_material(&mut self, handle: MaterialHandle) -> Option<GpuMaterial> {
         self.materials.remove(&handle)
     }
+
+    // ── Iteration ─────────────────────────────────────────────────────────────
+
+    pub fn iter_meshes(&self) -> impl Iterator<Item = (MeshHandle, &GpuMesh)> {
+        self.meshes.iter().map(|(&h, m)| (h, m))
+    }
+
+    pub fn iter_materials(&self) -> impl Iterator<Item = (MaterialHandle, &GpuMaterial)> {
+        self.materials.iter().map(|(&h, m)| (h, m))
+    }
+
+    // ── Bulk operations ───────────────────────────────────────────────────────
+
+    /// Move all meshes and materials from `other` into `self`, preserving the
+    /// original handles.  Handles that already exist in `self` are overwritten.
+    ///
+    /// Use this to merge a scene-build registry into the integration registry
+    /// after asset upload, so the handle IDs stored in JSON chunk files remain
+    /// valid at runtime.
+    pub fn merge(&mut self, other: AssetRegistry) {
+        for (handle, mesh) in other.meshes {
+            // Ensure our counter stays above any absorbed handle value.
+            if handle.0 >= self.next_handle {
+                self.next_handle = handle.0 + 1;
+            }
+            self.meshes.insert(handle, mesh);
+        }
+        for (handle, mat) in other.materials {
+            if handle.0 >= self.next_handle {
+                self.next_handle = handle.0 + 1;
+            }
+            self.materials.insert(handle, mat);
+        }
+    }
+
+    /// Drain all meshes, returning them as `(MeshHandle, GpuMesh)` pairs.
+    pub fn drain_meshes(&mut self) -> impl Iterator<Item = (MeshHandle, GpuMesh)> + '_ {
+        self.meshes.drain()
+    }
+
+    /// Drain all materials, returning them as `(MaterialHandle, GpuMaterial)` pairs.
+    pub fn drain_materials(&mut self) -> impl Iterator<Item = (MaterialHandle, GpuMaterial)> + '_ {
+        self.materials.drain()
+    }
+
+    pub fn mesh_count    (&self) -> usize { self.meshes.len() }
+    pub fn material_count(&self) -> usize { self.materials.len() }
 }
 
 impl Default for AssetRegistry {
