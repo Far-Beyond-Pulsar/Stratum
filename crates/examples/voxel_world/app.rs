@@ -20,7 +20,7 @@ use helio_render_v2::{
 };
 
 use stratum::{
-    CameraId, CameraKind, Components, LevelStreamer, LightData, Projection,
+    CameraId, CameraKind, Components, EntityId, LevelStreamer, LightData, Projection,
     RenderTargetHandle, SimulationMode, SkyAtmosphereData, SkylightData,
     Stratum, StratumCamera, Transform, Viewport,
 };
@@ -30,6 +30,28 @@ use crate::camera::*;
 use crate::chunks::VoxelChunkManager;
 use crate::materials::MaterialPalette;
 use crate::terrain::*;
+
+// ── Asset loading ───────────────────────────────────────────────────────────
+
+fn load_sprite(path: &str) -> (Vec<u8>, u32, u32) {
+    let asset_bytes: Option<&'static [u8]> = match path {
+        "probe.png"     => Some(include_bytes!("../../../assets/probe.png")),
+        "spotlight.png" => Some(include_bytes!("../../../assets/spotlight.png")),
+        _ => None,
+    };
+
+    let img = asset_bytes
+        .and_then(|bytes| image::load_from_memory(bytes).ok())
+        .unwrap_or_else(|| {
+            log::warn!("Could not decode embedded '{}', using 1x1 white fallback", path);
+            let mut px = image::RgbaImage::new(1, 1);
+            px.put_pixel(0, 0, image::Rgba([255, 255, 255, 255]));
+            image::DynamicImage::ImageRgba8(px)
+        })
+        .into_rgba8();
+    let (w, h) = img.dimensions();
+    (img.into_raw(), w, h)
+}
 
 // ── Level directory ─────────────────────────────────────────────────────────
 
@@ -80,6 +102,7 @@ pub struct AppState {
     stratum:        Stratum,
     integration:    HelioIntegration,
     main_cam_id:    CameraId,
+    sky_entity_id:  EntityId,
     chunks:         VoxelChunkManager,
     streamer:       LevelStreamer,
     palette:        MaterialPalette,
@@ -154,12 +177,16 @@ impl ApplicationHandler for App {
             desired_maximum_frame_latency: 2,
         });
 
+        let (probe_rgba, probe_w, probe_h) = load_sprite("probe.png");
+
         let features = FeatureRegistry::builder()
             .with_feature(LightingFeature::new())
             .with_feature(ShadowsFeature::new().with_atlas_size(2048).with_max_lights(4))
             .with_feature(BloomFeature::new().with_intensity(0.1).with_threshold(2.0))
             .with_feature(RadianceCascadesFeature::new().with_camera_follow([40.0, 20.0, 40.0]))
-            .with_feature(BillboardsFeature::new())
+            .with_feature(BillboardsFeature::new()
+                .with_sprite(probe_rgba, probe_w, probe_h)
+                .with_max_instances(8192))
             .build();
 
         let renderer = Renderer::new(
@@ -186,21 +213,21 @@ impl ApplicationHandler for App {
                     .with_light(LightData::Directional {
                         direction: Vec3::new(-0.4, -1.0, -0.3).normalize().to_array(),
                         color:     [1.0, 0.97, 0.88],
-                        intensity: 15.0,
+                        intensity: 5.0,
                     }),
             );
         }
 
         // Skylight — atmospheric sky + sky-driven ambient
-        {
+        let sky_entity_id = {
             let level = stratum.level_mut(level_id).unwrap();
             level.spawn_entity(
                 Components::new()
                     .with_transform(Transform::default())
                     .with_sky_atmosphere(SkyAtmosphereData::new())
                     .with_skylight(SkylightData::new().with_intensity(0.8)),
-            );
-        }
+            )
+        };
 
         // Camera
         let main_cam_id = stratum.register_camera(StratumCamera {
@@ -221,7 +248,7 @@ impl ApplicationHandler for App {
 
         self.state = Some(AppState {
             window, surface, device, queue, surface_format: fmt,
-            stratum, integration, main_cam_id,
+            stratum, integration, main_cam_id, sky_entity_id,
             chunks, streamer, palette,
             last_frame:     std::time::Instant::now(),
             keys:           HashSet::new(),
@@ -349,55 +376,69 @@ impl ApplicationHandler for App {
 
 // ── RC probe visualization ──────────────────────────────────────────────────
 
-fn get_rc_probe_grid(camera_pos: Vec3) -> Vec<BillboardInstance> {
-    const GRID_SPACING: f32 = 12.0;  // Probe spacing in meters
-    const GRID_EXTENT: f32 = 40.0;   // ±40m around camera
-    
-    const COLOR_PROBE: [f32; 4] = [0.0, 1.0, 1.0, 0.8];  // Cyan
-    const SIZE_PROBE: [f32; 2] = [0.1, 0.1];
-    
-    let mut probes = Vec::new();
-    let steps = (GRID_EXTENT / GRID_SPACING) as i32;
-    
-    for xi in -steps..=steps {
-        for yi in -steps..=steps {
-            for zi in -steps..=steps {
-                let x = camera_pos.x + xi as f32 * GRID_SPACING;
-                let y = camera_pos.y + yi as f32 * GRID_SPACING;
-                let z = camera_pos.z + zi as f32 * GRID_SPACING;
-                
-                probes.push(
-                    BillboardInstance::new([x, y, z], SIZE_PROBE)
-                        .with_color(COLOR_PROBE)
-                        .with_screen_scale(true)
-                );
-            }
-        }
-    }
-    
-    probes
-}
+const RC_CASCADE_COUNT: usize = 4;
+const RC_HALF_EXTENTS_C0: [f32; 3] = [40.0, 20.0, 40.0]; // must match with_camera_follow() args
+const RC_CASCADE_DIMS: [u32; RC_CASCADE_COUNT] = [16, 8, 4, 2];
+const RC_CASCADE_COLORS: [[f32; 4]; RC_CASCADE_COUNT] = [
+    [0.10, 0.95, 1.00, 0.85], // C0: cyan
+    [0.25, 1.00, 0.25, 0.78], // C1: green
+    [1.00, 0.75, 0.20, 0.72], // C2: amber
+    [1.00, 0.25, 0.25, 0.68], // C3: red
+];
 
-/// Compute RC bounds using camera-follow logic (matches RadianceCascadesFeature).
-fn get_rc_bounds(camera_pos: Vec3) -> (Vec3, Vec3) {
-    const RC_HALF_EXTENTS: [f32; 3] = [40.0, 20.0, 40.0];  // Must match with_camera_follow() args
-    const PROBE_DIM: f32 = 16.0;  // CASCADE 0 probe grid dimension
-    
-    let hx = RC_HALF_EXTENTS[0].max(0.01);
-    let hy = RC_HALF_EXTENTS[1].max(0.01);
-    let hz = RC_HALF_EXTENTS[2].max(0.01);
+/// Returns min/max bounds for one cascade using camera-follow snapping.
+fn get_rc_cascade_bounds(camera_pos: Vec3, cascade_idx: usize) -> (Vec3, Vec3) {
+    let scale = (1u32 << cascade_idx) as f32;
+    let hx = (RC_HALF_EXTENTS_C0[0] * scale).max(0.01);
+    let hy = (RC_HALF_EXTENTS_C0[1] * scale).max(0.01);
+    let hz = (RC_HALF_EXTENTS_C0[2] * scale).max(0.01);
 
-    // Snap to cascade-0 probe cell size to keep GI stable while moving.
-    let cell_x = (hx * 2.0) / PROBE_DIM;
-    let cell_z = (hz * 2.0) / PROBE_DIM;
+    let probe_dim = RC_CASCADE_DIMS[cascade_idx] as f32;
+    let cell_x = (hx * 2.0) / probe_dim;
+    let cell_z = (hz * 2.0) / probe_dim;
     let anchor_x = (camera_pos.x / cell_x).round() * cell_x;
     let anchor_z = (camera_pos.z / cell_z).round() * cell_z;
     let anchor_y = camera_pos.y;
 
     let min = Vec3::new(anchor_x - hx, anchor_y - hy, anchor_z - hz);
     let max = Vec3::new(anchor_x + hx, anchor_y + hy, anchor_z + hz);
-    
     (min, max)
+}
+
+/// Build billboard instances for all 4 RC cascades.
+fn get_rc_probe_grid(camera_pos: Vec3) -> Vec<BillboardInstance> {
+    let total_probe_count: usize = RC_CASCADE_DIMS
+        .iter()
+        .map(|d| (*d as usize).pow(3))
+        .sum();
+    let mut probes = Vec::with_capacity(total_probe_count);
+
+    for cascade_idx in 0..RC_CASCADE_COUNT {
+        let dim = RC_CASCADE_DIMS[cascade_idx];
+        let color = RC_CASCADE_COLORS[cascade_idx];
+        let (min, max) = get_rc_cascade_bounds(camera_pos, cascade_idx);
+
+        let cell_x = (max.x - min.x) / dim as f32;
+        let cell_y = (max.y - min.y) / dim as f32;
+        let cell_z = (max.z - min.z) / dim as f32;
+
+        // Give coarser cascades larger markers so layers are visually distinct.
+        let probe_size = cell_x.min(cell_y).min(cell_z) * 0.18;
+        let size = [probe_size, probe_size];
+
+        for px in 0..dim {
+            for py in 0..dim {
+                for pz in 0..dim {
+                    let x = min.x + (px as f32 + 0.5) * cell_x;
+                    let y = min.y + (py as f32 + 0.5) * cell_y;
+                    let z = min.z + (pz as f32 + 0.5) * cell_z;
+                    probes.push(BillboardInstance::new([x, y, z], size).with_color(color));
+                }
+            }
+        }
+    }
+
+    probes
 }
 
 // ── Per-frame logic ─────────────────────────────────────────────────────────
@@ -430,6 +471,16 @@ impl AppState {
             .map(|c| c.position)
             .unwrap_or(Vec3::ZERO);
 
+        // Update sky entity position to camera (camera-relative, always visible)
+        {
+            let level = self.stratum.active_level_mut().expect("level");
+            if let Some(sky) = level.entities_mut().get_mut(self.sky_entity_id) {
+                if let Some(transform) = &mut sky.transform {
+                    transform.position = cam_pos;
+                }
+            }
+        }
+
         // Drain stream events → pending queue → flush uploads
         let new_events: Vec<_> = self.streamer.poll_loaded().into_iter().collect();
         self.chunks.collect_events(new_events);
@@ -455,6 +506,32 @@ impl AppState {
         let views = self.stratum.build_views(size.width, size.height, self.time);
         if views.is_empty() { return; }
 
+        // Inject RC probe billboards BEFORE frame submission so they are
+        // merged into the scene by HelioIntegration.
+        if self.probe_vis {
+            self.integration.set_extra_billboards(get_rc_probe_grid(cam_pos));
+        } else {
+            self.integration.clear_extra_billboards();
+        }
+
+        // RC bounds debug boxes (wireframe, one per cascade)
+        if self.rc_debug_bound {
+            for cascade_idx in 0..RC_CASCADE_COUNT {
+                let (min, max) = get_rc_cascade_bounds(cam_pos, cascade_idx);
+                let center = (min + max) * 0.5;
+                let half_extents = (max - min) * 0.5;
+                let color = RC_CASCADE_COLORS[cascade_idx];
+                let thickness = 0.04 + cascade_idx as f32 * 0.02;
+                self.integration.renderer_mut().debug_box(
+                    center,
+                    half_extents,
+                    glam::Quat::IDENTITY,
+                    color,
+                    thickness,
+                );
+            }
+        }
+
         let output = match self.surface.get_current_texture() {
             Ok(t)  => t,
             Err(e) => { log::warn!("Surface error: {e:?}"); return; }
@@ -464,39 +541,6 @@ impl AppState {
 
         if let Err(e) = self.integration.submit_frame(&views, level, &view, dt) {
             log::error!("Render error: {e:?}");
-        }
-
-        // Draw RC probe visualization if enabled
-        if self.probe_vis {
-            if let Some(first_view) = views.first() {
-                let cam_pos = glam::Vec3::from(first_view.camera_position);
-                let probes = get_rc_probe_grid(cam_pos);
-                
-                for probe in probes {
-                    let pos = glam::Vec3::new(probe.position[0], probe.position[1], probe.position[2]);
-                    self.integration.renderer_mut().debug_sphere(pos, 0.25, [0.0, 1.0, 1.0, 0.8], 0.02);
-                }
-            }
-        }
-
-        // Draw RC bounds visualization if enabled
-        if self.rc_debug_bound {
-            if let Some(first_view) = views.first() {
-                let cam_pos = glam::Vec3::from(first_view.camera_position);
-                let (min, max) = get_rc_bounds(cam_pos);
-                let center = (min + max) * 0.5;
-                let half_extents = (max - min) * 0.5;
-                
-                self.integration.renderer_mut().debug_box(
-                    center,
-                    half_extents,
-                    glam::Quat::IDENTITY,
-                    [1.0, 1.0, 0.0, 0.8],  // Yellow
-                    0.05,
-                );
-                
-                log::info!("RC Bounds: min={:?}, max={:?}, size={:?}", min, max, max - min);
-            }
         }
 
         output.present();

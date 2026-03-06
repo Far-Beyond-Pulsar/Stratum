@@ -72,16 +72,35 @@ pub fn build_render_views(
         .filter(|id| {
             // Already covered by active set — skip to avoid duplicates.
             if active_set.contains(id) { return false; }
-            // Include only if this entity is a light (meshes stay partition-gated).
-            store.get(*id).map(|c| c.light.is_some()).unwrap_or(false)
+            // Include if this entity is a light or a scene-global sky component.
+            // Meshes stay partition-gated; lights and sky entities are needed
+            // regardless of chunk activation state.
+            store.get(*id).map(|c| {
+                c.light.is_some()
+                    || c.skylight.is_some()
+                    || c.sky_atmosphere.is_some()
+            }).unwrap_or(false)
         })
         .collect();
 
-    // Full candidate list: active geometry + out-of-range lights.
+    // Global entities (skylight, sky atmosphere) are never placed in the partition.
+    // Collect them directly from the entity store.
+    let global_candidates: Vec<_> = store.iter()
+        .filter(|(id, c)| {
+            // Skip if already in active set
+            if active_set.contains(id) { return false; }
+            // Include only scene-global sky components
+            c.skylight.is_some() || c.sky_atmosphere.is_some()
+        })
+        .map(|(id, _)| id)
+        .collect();
+
+    // Full candidate list: active geometry + out-of-range lights + global entities.
     let candidates: Vec<_> = active_entities
         .iter()
         .copied()
         .chain(light_candidates)
+        .chain(global_candidates)
         .collect();
 
     let mut views: Vec<RenderView> = cameras

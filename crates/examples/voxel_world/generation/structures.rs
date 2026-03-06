@@ -34,6 +34,8 @@ pub fn emit_prefab_entities(
             mesh:            None,
             material:        template.material.map(|m| m.0),
             light:           None,
+            skylight:        None,
+            sky_atmosphere:  None,
             billboard:       None,
             bounding_radius: 0.866,
             tags:            vec![],

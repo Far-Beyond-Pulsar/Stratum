@@ -97,24 +97,48 @@ impl Level {
     ///
     /// Uses `Transform::position` as the placement point; entities without a
     /// transform are placed at the origin chunk.
+    ///
+    /// **Exception:** Scene-global entities (skylight, sky atmosphere) are NOT
+    /// placed into the partition — they exist outside the streaming system and
+    /// are always considered present regardless of chunk activation state.
     pub fn spawn_entity(&mut self, components: Components) -> EntityId {
-        let world_pos = components.transform
-            .as_ref()
-            .map(|t: &Transform| t.position)
-            .unwrap_or(Vec3::ZERO);
         let id = self.entities.spawn(components);
-        self.partition.place_entity(id, world_pos);
+        
+        // Scene-global entities (skylight, sky atmosphere) exist outside the
+        // partition system — they should always be visible regardless of chunk
+        // activation or streaming state.
+        let is_global = {
+            let c = self.entities.get(id);
+            c.map(|comps| comps.skylight.is_some() || comps.sky_atmosphere.is_some())
+                .unwrap_or(false)
+        };
+        
+        if !is_global {
+            let world_pos = self.entities.get(id)
+                .and_then(|c| c.transform.as_ref().map(|t| t.position))
+                .unwrap_or(Vec3::ZERO);
+            self.partition.place_entity(id, world_pos);
+        }
+        
         id
     }
 
     /// Despawn an entity and remove it from the world partition.
     pub fn despawn_entity(&mut self, id: EntityId) -> Option<Components> {
         let components = self.entities.despawn(id)?;
-        let world_pos = components.transform
-            .as_ref()
-            .map(|t: &Transform| t.position)
-            .unwrap_or(Vec3::ZERO);
-        self.partition.remove_entity(id, world_pos);
+        
+        // Scene-global entities were never placed in the partition, so don't
+        // attempt to remove them.
+        let is_global = components.skylight.is_some() || components.sky_atmosphere.is_some();
+        
+        if !is_global {
+            let world_pos = components.transform
+                .as_ref()
+                .map(|t: &Transform| t.position)
+                .unwrap_or(Vec3::ZERO);
+            self.partition.remove_entity(id, world_pos);
+        }
+        
         Some(components)
     }
 

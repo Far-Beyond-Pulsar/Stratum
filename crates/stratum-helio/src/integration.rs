@@ -24,6 +24,8 @@ use glam::{Quat, Vec3};
 use stratum::{ChunkState, EntityStore, Level, LightData, RenderTargetHandle, RenderView, WorldPartition};
 use helio_render_v2::Renderer;
 
+use helio_render_v2::features::BillboardInstance;
+
 use crate::asset_registry::AssetRegistry;
 use crate::bridge::{render_view_to_camera, render_view_to_scene};
 
@@ -35,11 +37,14 @@ pub struct HelioIntegration {
     /// Named offscreen render targets. Populated by the host when
     /// `RenderTargetHandle::OffscreenTexture` cameras are in use.
     offscreen_views:  HashMap<String, wgpu::TextureView>,
+    /// Extra billboards injected by the host (e.g. probe visualisation).
+    /// Merged into every scene in `submit_frame`.
+    extra_billboards: Vec<BillboardInstance>,
 }
 
 impl HelioIntegration {
     pub fn new(renderer: Renderer, assets: AssetRegistry) -> Self {
-        Self { renderer, assets, offscreen_views: HashMap::new() }
+        Self { renderer, assets, offscreen_views: HashMap::new(), extra_billboards: Vec::new() }
     }
 
     // ── Accessors ─────────────────────────────────────────────────────────────
@@ -71,6 +76,19 @@ impl HelioIntegration {
     /// Remove a named offscreen view. The contained `TextureView` is dropped.
     pub fn unregister_offscreen_view(&mut self, name: &str) {
         self.offscreen_views.remove(name);
+    }
+
+    // ── Extra billboards ──────────────────────────────────────────────────────
+
+    /// Set extra billboards that will be merged into every scene during
+    /// `submit_frame`. Useful for debug overlays like RC probe grids.
+    pub fn set_extra_billboards(&mut self, billboards: Vec<BillboardInstance>) {
+        self.extra_billboards = billboards;
+    }
+
+    /// Clear all extra billboards.
+    pub fn clear_extra_billboards(&mut self) {
+        self.extra_billboards.clear();
     }
 
     // ── Lifecycle ─────────────────────────────────────────────────────────────
@@ -173,8 +191,13 @@ impl HelioIntegration {
 
         for view in views {
             // ── Translate to Helio types ──────────────────────────────────────
-            let scene  = render_view_to_scene(view, store, &self.assets);
-            let camera = render_view_to_camera(view);
+            let mut scene = render_view_to_scene(view, store, &self.assets);
+            let camera    = render_view_to_camera(view);
+
+            // Merge extra billboards (probe vis, etc.) into the scene.
+            if !self.extra_billboards.is_empty() {
+                scene.billboards.extend(self.extra_billboards.iter().cloned());
+            }
 
             // ── Resolve render target then submit ─────────────────────────────
             let result = match &view.render_target {

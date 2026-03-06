@@ -22,7 +22,7 @@ serde_json  = "1"
 wgpu = { git = "https://github.com/Far-Beyond-Pulsar/wgpu", rev = "fce5b80e8017304449124b12637ec324417e40c8" }
 
 # Helio renderer — path relative to this workspace root.
-helio-render-v2 = { git = "https://github.com/Far-Beyond-Pulsar/Helio", rev = "020da96ebf106e165da9f6dd51045ff5a874aee2" }
+helio-render-v2 = { git = "https://github.com/Far-Beyond-Pulsar/Helio", rev = "6b580d6b2e1d4922ba7f90810c1228662468d4f9" }
 
 # Stratum crates
 stratum       = { path = "crates/stratum" }
