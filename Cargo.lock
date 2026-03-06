@@ -758,7 +758,7 @@ dependencies = [
 [[package]]
 name = "helio-render-v2"
 version = "0.1.8"
-source = "git+https://github.com/Far-Beyond-Pulsar/Helio?rev=6b32baf0e38ef8b0b3df0ddb3e1013930bdbdf3b#6b32baf0e38ef8b0b3df0ddb3e1013930bdbdf3b"
+source = "git+https://github.com/Far-Beyond-Pulsar/Helio?rev=020da96ebf106e165da9f6dd51045ff5a874aee2#020da96ebf106e165da9f6dd51045ff5a874aee2"
 dependencies = [
  "bitflags 2.11.0",
  "bytemuck",

@@ -15,7 +15,7 @@ use winit::{
 
 use helio_render_v2::{
     Renderer, RendererConfig,
-    features::{BloomFeature, FeatureRegistry, LightingFeature, ShadowsFeature},
+    features::{BloomFeature, FeatureRegistry, LightingFeature, ShadowsFeature, BillboardsFeature, RadianceCascadesFeature, BillboardInstance},
     passes::AntiAliasingMode,
 };
 
@@ -89,6 +89,8 @@ pub struct AppState {
     time:           f32,
     frame_count:    u32,
     fps_acc:        f32,
+    probe_vis:      bool,      // Digit3: toggle RC probe visualization
+    rc_debug_bound: bool,      // 'r': toggle RC bounds visualization
 }
 
 // ── ApplicationHandler ─────────────────────────────────────────────────────
@@ -155,6 +157,8 @@ impl ApplicationHandler for App {
             .with_feature(LightingFeature::new())
             .with_feature(ShadowsFeature::new().with_atlas_size(2048).with_max_lights(4))
             .with_feature(BloomFeature::new().with_intensity(0.1).with_threshold(2.0))
+            .with_feature(RadianceCascadesFeature::new().with_camera_follow([40.0, 20.0, 40.0]))
+            .with_feature(BillboardsFeature::new())
             .build();
 
         let renderer = Renderer::new(
@@ -181,7 +185,7 @@ impl ApplicationHandler for App {
                     .with_light(LightData::Directional {
                         direction: Vec3::new(-0.4, -1.0, -0.3).normalize().to_array(),
                         color:     [1.0, 0.97, 0.88],
-                        intensity: 8.0,
+                        intensity: 15.0,
                     }),
             );
         }
@@ -214,6 +218,8 @@ impl ApplicationHandler for App {
             time:           0.0,
             frame_count:    0,
             fps_acc:        0.0,
+            probe_vis:      false,
+            rc_debug_bound: false,
         });
     }
 
@@ -244,6 +250,22 @@ impl ApplicationHandler for App {
             }, .. } => {
                 state.stratum.toggle_mode();
                 log::info!("Mode → {:?}", state.stratum.mode());
+            }
+
+            WindowEvent::KeyboardInput { event: KeyEvent {
+                state: ElementState::Pressed,
+                physical_key: PhysicalKey::Code(KeyCode::Digit3), ..
+            }, .. } => {
+                state.probe_vis = !state.probe_vis;
+                log::info!("RC Probe Visualization → {}", if state.probe_vis { "ON" } else { "OFF" });
+            }
+
+            WindowEvent::KeyboardInput { event: KeyEvent {
+                state: ElementState::Pressed,
+                physical_key: PhysicalKey::Code(KeyCode::KeyR), ..
+            }, .. } => {
+                state.rc_debug_bound = !state.rc_debug_bound;
+                log::info!("RC Debug Bounds → {}", if state.rc_debug_bound { "ON" } else { "OFF" });
             }
 
             WindowEvent::KeyboardInput { event: KeyEvent {
@@ -313,6 +335,59 @@ impl ApplicationHandler for App {
     }
 }
 
+// ── RC probe visualization ──────────────────────────────────────────────────
+
+fn get_rc_probe_grid(camera_pos: Vec3) -> Vec<BillboardInstance> {
+    const GRID_SPACING: f32 = 12.0;  // Probe spacing in meters
+    const GRID_EXTENT: f32 = 40.0;   // ±40m around camera
+    
+    const COLOR_PROBE: [f32; 4] = [0.0, 1.0, 1.0, 0.8];  // Cyan
+    const SIZE_PROBE: [f32; 2] = [0.1, 0.1];
+    
+    let mut probes = Vec::new();
+    let steps = (GRID_EXTENT / GRID_SPACING) as i32;
+    
+    for xi in -steps..=steps {
+        for yi in -steps..=steps {
+            for zi in -steps..=steps {
+                let x = camera_pos.x + xi as f32 * GRID_SPACING;
+                let y = camera_pos.y + yi as f32 * GRID_SPACING;
+                let z = camera_pos.z + zi as f32 * GRID_SPACING;
+                
+                probes.push(
+                    BillboardInstance::new([x, y, z], SIZE_PROBE)
+                        .with_color(COLOR_PROBE)
+                        .with_screen_scale(true)
+                );
+            }
+        }
+    }
+    
+    probes
+}
+
+/// Compute RC bounds using camera-follow logic (matches RadianceCascadesFeature).
+fn get_rc_bounds(camera_pos: Vec3) -> (Vec3, Vec3) {
+    const RC_HALF_EXTENTS: [f32; 3] = [40.0, 20.0, 40.0];  // Must match with_camera_follow() args
+    const PROBE_DIM: f32 = 16.0;  // CASCADE 0 probe grid dimension
+    
+    let hx = RC_HALF_EXTENTS[0].max(0.01);
+    let hy = RC_HALF_EXTENTS[1].max(0.01);
+    let hz = RC_HALF_EXTENTS[2].max(0.01);
+
+    // Snap to cascade-0 probe cell size to keep GI stable while moving.
+    let cell_x = (hx * 2.0) / PROBE_DIM;
+    let cell_z = (hz * 2.0) / PROBE_DIM;
+    let anchor_x = (camera_pos.x / cell_x).round() * cell_x;
+    let anchor_z = (camera_pos.z / cell_z).round() * cell_z;
+    let anchor_y = camera_pos.y;
+
+    let min = Vec3::new(anchor_x - hx, anchor_y - hy, anchor_z - hz);
+    let max = Vec3::new(anchor_x + hx, anchor_y + hy, anchor_z + hz);
+    
+    (min, max)
+}
+
 // ── Per-frame logic ─────────────────────────────────────────────────────────
 
 impl AppState {
@@ -378,6 +453,40 @@ impl AppState {
         if let Err(e) = self.integration.submit_frame(&views, level, &view, dt) {
             log::error!("Render error: {e:?}");
         }
+
+        // Draw RC probe visualization if enabled
+        if self.probe_vis {
+            if let Some(first_view) = views.first() {
+                let cam_pos = glam::Vec3::from(first_view.camera_position);
+                let probes = get_rc_probe_grid(cam_pos);
+                
+                for probe in probes {
+                    let pos = glam::Vec3::new(probe.position[0], probe.position[1], probe.position[2]);
+                    self.integration.renderer_mut().debug_sphere(pos, 0.25, [0.0, 1.0, 1.0, 0.8], 0.02);
+                }
+            }
+        }
+
+        // Draw RC bounds visualization if enabled
+        if self.rc_debug_bound {
+            if let Some(first_view) = views.first() {
+                let cam_pos = glam::Vec3::from(first_view.camera_position);
+                let (min, max) = get_rc_bounds(cam_pos);
+                let center = (min + max) * 0.5;
+                let half_extents = (max - min) * 0.5;
+                
+                self.integration.renderer_mut().debug_box(
+                    center,
+                    half_extents,
+                    glam::Quat::IDENTITY,
+                    [1.0, 1.0, 0.0, 0.8],  // Yellow
+                    0.05,
+                );
+                
+                log::info!("RC Bounds: min={:?}, max={:?}, size={:?}", min, max, max - min);
+            }
+        }
+
         output.present();
     }
 }
