@@ -16,6 +16,7 @@ use winit::{
 use helio_render_v2::{
     Renderer, RendererConfig,
     features::{BloomFeature, FeatureRegistry, LightingFeature, ShadowsFeature},
+    passes::AntiAliasingMode,
 };
 
 use stratum::{
@@ -152,7 +153,8 @@ impl ApplicationHandler for App {
 
         let renderer = Renderer::new(
             device.clone(), queue.clone(),
-            RendererConfig { width: size.width, height: size.height, surface_format: fmt, features },
+            RendererConfig::new(size.width, size.height, fmt, features)
+                .with_aa(AntiAliasingMode::Fxaa),
         ).expect("renderer");
 
         let mut integration = HelioIntegration::new(renderer, AssetRegistry::new());

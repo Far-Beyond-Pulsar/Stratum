@@ -9,7 +9,7 @@ use crate::noise::smooth_noise;
 pub const CHUNK_SIZE: f32       = 16.0;
 pub const VOXELS_PER_CHUNK: i32 = 16;
 pub const ACTIVATION_RADIUS: f32 = CHUNK_SIZE * 8.0;
-pub const LOAD_RADIUS: i32      = 32;
+pub const LOAD_RADIUS: i32      = 16;
 pub const MAX_Y_CHUNKS: i32     = 3;
 
 pub const BASE_HEIGHT: i32      = 4;
