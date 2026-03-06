@@ -25,6 +25,9 @@
 
 </div>
 
+![alt text](image.png)
+![alt text](image-1.png)
+
 Textures for Voxel demo from https://faithfulpack.net 64x Java. Thanks guys you are the best!!
 
 ---
