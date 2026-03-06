@@ -505,7 +505,7 @@ impl ApplicationHandler for App {
                 height:         size.height,
                 surface_format,
                 features:       feature_registry,
-            },
+            }
         )
         .expect("Helio renderer");
 
