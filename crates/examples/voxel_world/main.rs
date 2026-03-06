@@ -29,6 +29,8 @@ fn main() {
         .filter_level(log::LevelFilter::Info)
         .init();
 
+    let no_fs = std::env::args().any(|a| a == "--no-fs");
+
     log::info!(
         "Multi-biome voxel world — chunk {}m, load radius {} → {} chunks max",
         terrain::CHUNK_SIZE as i32,
@@ -37,8 +39,11 @@ fn main() {
     );
     log::info!("Biomes: Plains, Forest, Taiga, Desert, Swamp, Mountains, Jungle");
     log::info!("WASD fly | Space/Shift up/down | Mouse look (click) | Tab mode | Esc exit");
+    if no_fs {
+        log::info!("Flag enabled: --no-fs (chunk filesystem reads/writes disabled)");
+    }
 
     winit::event_loop::EventLoop::new().expect("event loop")
-        .run_app(&mut app::App::new())
+        .run_app(&mut app::App::new(no_fs))
         .expect("run_app failed");
 }

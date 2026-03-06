@@ -82,6 +82,8 @@ pub fn chunk_file_path(level_dir: &Path, coord: ChunkCoord) -> PathBuf {
 pub fn save_level(level: &Level, level_dir: &Path) -> Result<(), LevelFsError> {
     let bucket_size = DEFAULT_BUCKET_SIZE;
 
+
+    println!("Saving level '{}' to '{}'", level.name, level_dir.display());
     fs::create_dir_all(level_dir.join("chunks"))?;
 
     let mut sector_map: HashMap<[i32; 3], Vec<ChunkEntry>> = HashMap::new();
@@ -154,6 +156,7 @@ pub fn save_level(level: &Level, level_dir: &Path) -> Result<(), LevelFsError> {
 /// This is cheap (a single JSON file) and should be called to validate the
 /// level before beginning a streaming session.
 pub fn load_manifest(level_dir: &Path) -> Result<LevelManifest, LevelFsError> {
+    println!("Loading level manifest from '{}'", level_dir.display());
     read_json(&manifest_path(level_dir))
 }
 
@@ -161,6 +164,7 @@ pub fn load_manifest(level_dir: &Path) -> Result<LevelManifest, LevelFsError> {
 ///
 /// Returns `LevelFsError::ChunkNotFound` if the file does not exist.
 pub fn load_chunk(level_dir: &Path, coord: ChunkCoord) -> Result<ChunkFile, LevelFsError> {
+    println!("Loading chunk at '{:?}' from '{}'", coord, level_dir.display());
     let path = chunk_file_path(level_dir, coord);
     if !path.exists() {
         return Err(LevelFsError::ChunkNotFound(format!("{:?}", coord)));
@@ -176,6 +180,7 @@ pub fn load_sector_index(
     coord:       ChunkCoord,
     bucket_size: i32,
 ) -> Result<SectorIndex, LevelFsError> {
+    println!("Loading sector index for chunk at '{:?}' from '{}'", coord, level_dir.display());
     let sector = sector_for(coord, bucket_size);
     read_json(&sector_index_path(level_dir, sector))
 }
@@ -186,6 +191,7 @@ pub fn load_sector_index(
 ///
 /// Cheap filesystem stat — safe to call every frame per candidate chunk.
 pub fn chunk_on_disk(level_dir: &Path, coord: ChunkCoord) -> bool {
+    println!("Checking if chunk at '{:?}' exists on disk in '{}'", coord, level_dir.display());
     chunk_file_path(level_dir, coord).exists()
 }
 
@@ -201,6 +207,7 @@ pub fn save_chunk(
     chunk_file: &ChunkFile,
     bucket_size: i32,
 ) -> Result<(), LevelFsError> {
+    println!("Saving chunk at '{:?}' to '{}'", coord, level_dir.display());
     fs::create_dir_all(level_dir.join("chunks"))?;
     write_json(&chunk_file_path(level_dir, coord), chunk_file)?;
 
@@ -245,6 +252,8 @@ pub fn chunk_to_components(chunk: ChunkFile) -> Vec<(EntityId, Components)> {
 ///
 /// Useful at startup to know which coords to pre-request from the streamer.
 pub fn discover_chunk_coords(level_dir: &Path) -> Result<Vec<ChunkCoord>, LevelFsError> {
+    println!("Discovering chunk coordinates from indexes in '{}'", level_dir.display());
+
     let mut coords = Vec::new();
     let index_root = level_dir.join("indexes");
     if !index_root.exists() {
@@ -255,6 +264,8 @@ pub fn discover_chunk_coords(level_dir: &Path) -> Result<Vec<ChunkCoord>, LevelF
 }
 
 fn collect_index_entries(dir: &Path, out: &mut Vec<ChunkCoord>) -> Result<(), LevelFsError> {
+    println!("Collecting chunk coordinates from '{}'", dir.display());
+
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
         let path  = entry.path();
@@ -272,12 +283,16 @@ fn collect_index_entries(dir: &Path, out: &mut Vec<ChunkCoord>) -> Result<(), Le
 
 
 fn write_json<T: serde::Serialize>(path: &Path, value: &T) -> Result<(), LevelFsError> {
+    println!("Writing JSON to '{}'", path.display());
+
     let json = serde_json::to_string_pretty(value)?;
     fs::write(path, json)?;
     Ok(())
 }
 
 fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, LevelFsError> {
+    println!("Reading JSON from '{}'", path.display());
+
     let text  = fs::read_to_string(path)?;
     let value = serde_json::from_str(&text)?;
     Ok(value)

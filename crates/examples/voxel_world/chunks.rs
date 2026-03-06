@@ -30,6 +30,7 @@ const MAX_UPLOADS_PER_FRAME: usize = 4;
 
 pub struct VoxelChunkManager {
     dir:     PathBuf,
+    use_fs:  bool,
     /// Chunks resident in the live `Level`: coord → (entity IDs, mesh handles).
     pub loaded:    HashMap<ChunkCoord, (Vec<EntityId>, Vec<MeshHandle>)>,
     pub in_flight: HashSet<ChunkCoord>,
@@ -38,9 +39,10 @@ pub struct VoxelChunkManager {
 }
 
 impl VoxelChunkManager {
-    pub fn new(dir: PathBuf) -> Self {
+    pub fn new(dir: PathBuf, use_fs: bool) -> Self {
         Self {
             dir,
+            use_fs,
             loaded:        HashMap::new(),
             in_flight:     HashSet::new(),
             pending_ready: Vec::new(),
@@ -99,7 +101,7 @@ impl VoxelChunkManager {
 
         for coord in to_request.into_iter().take(MAX_REQUESTS_PER_FRAME) {
             self.in_flight.insert(coord);
-            if chunk_on_disk(&self.dir, coord) {
+            if self.use_fs && chunk_on_disk(&self.dir, coord) {
                 streamer.request_chunk(self.dir.clone(), coord);
             } else {
                 let lib = Arc::clone(&self.lib);

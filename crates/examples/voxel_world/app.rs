@@ -33,11 +33,11 @@ use crate::terrain::*;
 // ── Level directory ─────────────────────────────────────────────────────────
 
 fn level_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-        .join("levels")
-        .join("voxel_world")
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    exe_dir.join("levels").join("voxel_world")
 }
 
 /// Bump this key to wipe stale on-disk chunks after format changes.
@@ -52,6 +52,7 @@ fn ensure_cache_valid(dir: &std::path::Path) {
         .unwrap_or(false);
     if !current_ok {
         let _ = std::fs::remove_dir_all(dir);
+        println!("Invalidating level cache in '{}'", dir.display());
         std::fs::create_dir_all(dir).expect("create level dir");
         std::fs::write(&key_path, CACHE_KEY).expect("write cache key");
         log::info!("Level cache invalidated — regenerating chunks");
@@ -62,10 +63,11 @@ fn ensure_cache_valid(dir: &std::path::Path) {
 
 pub struct App {
     state: Option<AppState>,
+    no_fs: bool,
 }
 
 impl App {
-    pub fn new() -> Self { Self { state: None } }
+    pub fn new(no_fs: bool) -> Self { Self { state: None, no_fs } }
 }
 
 pub struct AppState {
@@ -95,7 +97,11 @@ impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.state.is_some() { return; }
 
-        ensure_cache_valid(&level_dir());
+        if self.no_fs {
+            log::info!("No-FS mode active: skipping level cache directory checks");
+        } else {
+            ensure_cache_valid(&level_dir());
+        }
 
         let window = Arc::new(
             event_loop.create_window(
@@ -195,7 +201,7 @@ impl ApplicationHandler for App {
         });
 
         let streamer = LevelStreamer::new();
-        let chunks   = VoxelChunkManager::new(level_dir());
+        let chunks   = VoxelChunkManager::new(level_dir(), !self.no_fs);
 
         self.state = Some(AppState {
             window, surface, device, queue, surface_format: fmt,
