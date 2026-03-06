@@ -121,6 +121,11 @@ pub fn visibility_cull(
                 return true;
             }
 
+            // Skylight / sky atmosphere are scene-global — never cull them.
+            if components.skylight.is_some() || components.sky_atmosphere.is_some() {
+                return true;
+            }
+
             // Effective bounding sphere radius:
             //  - mesh extent  → components.bounding_radius (set by caller from geometry)
             //  - light range  → light's own bounding_radius()

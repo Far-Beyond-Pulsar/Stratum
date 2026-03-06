@@ -134,6 +134,10 @@ pub struct EntityRecord {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub light:           Option<LightRecord>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub skylight:        Option<SkylightRecord>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sky_atmosphere:  Option<SkyAtmosphereRecord>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub billboard:       Option<BillboardRecord>,
     pub bounding_radius: f32,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -184,4 +188,26 @@ pub struct BillboardRecord {
     /// RGBA linear-colour tint.
     pub color:        [f32; 4],
     pub screen_scale: bool,
+}
+
+/// Serializable mirror of `SkylightData`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkylightRecord {
+    pub intensity:  f32,
+    pub color_tint: [f32; 3],
+}
+
+/// Serializable mirror of `SkyAtmosphereData`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkyAtmosphereRecord {
+    pub rayleigh_scatter: [f32; 3],
+    pub rayleigh_h_scale: f32,
+    pub mie_scatter:      f32,
+    pub mie_h_scale:      f32,
+    pub mie_g:            f32,
+    pub sun_intensity:    f32,
+    pub sun_disk_angle:   f32,
+    pub earth_radius:     f32,
+    pub atm_radius:       f32,
+    pub exposure:         f32,
 }

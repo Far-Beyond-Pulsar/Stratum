@@ -21,7 +21,8 @@ use helio_render_v2::{
 
 use stratum::{
     CameraId, CameraKind, Components, LevelStreamer, LightData, Projection,
-    RenderTargetHandle, SimulationMode, Stratum, StratumCamera, Transform, Viewport,
+    RenderTargetHandle, SimulationMode, SkyAtmosphereData, SkylightData,
+    Stratum, StratumCamera, Transform, Viewport,
 };
 use stratum_helio::{AssetRegistry, HelioIntegration};
 
@@ -187,6 +188,17 @@ impl ApplicationHandler for App {
                         color:     [1.0, 0.97, 0.88],
                         intensity: 15.0,
                     }),
+            );
+        }
+
+        // Skylight — atmospheric sky + sky-driven ambient
+        {
+            let level = stratum.level_mut(level_id).unwrap();
+            level.spawn_entity(
+                Components::new()
+                    .with_transform(Transform::default())
+                    .with_sky_atmosphere(SkyAtmosphereData::new())
+                    .with_skylight(SkylightData::new().with_intensity(0.8)),
             );
         }
 

@@ -3,8 +3,9 @@
 //! These are pure, side-effect-free functions. All GPU state is owned by
 //! `HelioIntegration`; this module only converts data shapes.
 
-use stratum::{RenderView, EntityStore, LightData};
+use stratum::{RenderView, EntityStore, LightData, SkylightData, SkyAtmosphereData};
 use helio_render_v2::{Camera, Scene, SceneLight};
+use helio_render_v2::scene::{Skylight, SkyAtmosphere};
 use helio_render_v2::features::BillboardInstance;
 use crate::asset_registry::AssetRegistry;
 
@@ -91,6 +92,19 @@ pub fn render_view_to_scene(
             .with_screen_scale(billboard.screen_scale);
             scene = scene.add_billboard(bb);
         }
+
+        // ── Skylight / Sky Atmosphere ────────────────────────────────────────
+        // Scene-global: first entity with these components wins.
+        if let Some(sky_atm) = &components.sky_atmosphere {
+            if scene.sky_atmosphere.is_none() {
+                scene = scene.with_sky_atmosphere(stratum_sky_atmosphere_to_helio(sky_atm));
+            }
+        }
+        if let Some(sl) = &components.skylight {
+            if scene.skylight.is_none() {
+                scene = scene.with_skylight(stratum_skylight_to_helio(sl));
+            }
+        }
     }
 
     log::debug!(
@@ -100,6 +114,30 @@ pub fn render_view_to_scene(
     );
 
     scene
+}
+
+// ── Skylight / Sky Atmosphere conversion ──────────────────────────────────────
+
+fn stratum_skylight_to_helio(s: &SkylightData) -> Skylight {
+    Skylight::new()
+        .with_intensity(s.intensity)
+        .with_tint(s.color_tint)
+}
+
+fn stratum_sky_atmosphere_to_helio(a: &SkyAtmosphereData) -> SkyAtmosphere {
+    SkyAtmosphere {
+        rayleigh_scatter: a.rayleigh_scatter,
+        rayleigh_h_scale: a.rayleigh_h_scale,
+        mie_scatter:      a.mie_scatter,
+        mie_h_scale:      a.mie_h_scale,
+        mie_g:            a.mie_g,
+        sun_intensity:    a.sun_intensity,
+        sun_disk_angle:   a.sun_disk_angle,
+        earth_radius:     a.earth_radius,
+        atm_radius:       a.atm_radius,
+        exposure:         a.exposure,
+        clouds:           None,
+    }
 }
 
 // ── Light conversion ──────────────────────────────────────────────────────────

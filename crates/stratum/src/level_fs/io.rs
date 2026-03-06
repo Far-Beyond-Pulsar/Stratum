@@ -11,13 +11,14 @@ use glam::{Quat, Vec3};
 
 use crate::chunk::ChunkCoord;
 use crate::entity::{
-    BillboardData, Components, EntityId, LightData, MaterialHandle, MeshHandle, Transform,
+    BillboardData, Components, EntityId, LightData, MaterialHandle, MeshHandle,
+    SkyAtmosphereData, SkylightData, Transform,
 };
 use crate::level::Level;
 
 use super::format::{
     BillboardRecord, ChunkEntry, ChunkFile, EntityRecord, LightRecord, SectorIndex,
-    TransformRecord, FORMAT_VERSION,
+    SkyAtmosphereRecord, SkylightRecord, TransformRecord, FORMAT_VERSION,
 };
 use super::{LevelFsError, LevelManifest};
 
@@ -310,6 +311,8 @@ pub(super) fn entity_to_record_pub(id: u64, c: &Components) -> EntityRecord {
         mesh:            c.mesh.map(|m| m.0),
         material:        c.material.map(|m| m.0),
         light:           c.light.as_ref().map(light_to_record),
+        skylight:        c.skylight.as_ref().map(skylight_to_record),
+        sky_atmosphere:  c.sky_atmosphere.as_ref().map(sky_atmosphere_to_record),
         billboard:       c.billboard.as_ref().map(billboard_to_record),
         bounding_radius: c.bounding_radius,
         tags:            c.tags.clone(),
@@ -330,7 +333,9 @@ pub(super) fn record_to_components(rec: EntityRecord) -> Components {
     }
     if let Some(m) = rec.mesh     { c = c.with_mesh(MeshHandle(m)); }
     if let Some(m) = rec.material { c = c.with_material(MaterialHandle(m)); }
-    if let Some(l) = rec.light    { c = c.with_light(light_from_record(l)); }
+    if let Some(l) = rec.light          { c = c.with_light(light_from_record(l)); }
+    if let Some(s) = rec.skylight       { c = c.with_skylight(skylight_from_record(s)); }
+    if let Some(a) = rec.sky_atmosphere { c = c.with_sky_atmosphere(sky_atmosphere_from_record(a)); }
     if let Some(b) = rec.billboard {
         c = c.with_billboard(BillboardData {
             size:         b.size,
@@ -364,6 +369,44 @@ fn light_to_record(l: &LightData) -> LightRecord {
 
 fn billboard_to_record(b: &BillboardData) -> BillboardRecord {
     BillboardRecord { size: b.size, color: b.color, screen_scale: b.screen_scale }
+}
+
+fn skylight_to_record(s: &SkylightData) -> SkylightRecord {
+    SkylightRecord { intensity: s.intensity, color_tint: s.color_tint }
+}
+
+fn skylight_from_record(r: SkylightRecord) -> SkylightData {
+    SkylightData { intensity: r.intensity, color_tint: r.color_tint }
+}
+
+fn sky_atmosphere_to_record(a: &SkyAtmosphereData) -> SkyAtmosphereRecord {
+    SkyAtmosphereRecord {
+        rayleigh_scatter: a.rayleigh_scatter,
+        rayleigh_h_scale: a.rayleigh_h_scale,
+        mie_scatter:      a.mie_scatter,
+        mie_h_scale:      a.mie_h_scale,
+        mie_g:            a.mie_g,
+        sun_intensity:    a.sun_intensity,
+        sun_disk_angle:   a.sun_disk_angle,
+        earth_radius:     a.earth_radius,
+        atm_radius:       a.atm_radius,
+        exposure:         a.exposure,
+    }
+}
+
+fn sky_atmosphere_from_record(r: SkyAtmosphereRecord) -> SkyAtmosphereData {
+    SkyAtmosphereData {
+        rayleigh_scatter: r.rayleigh_scatter,
+        rayleigh_h_scale: r.rayleigh_h_scale,
+        mie_scatter:      r.mie_scatter,
+        mie_h_scale:      r.mie_h_scale,
+        mie_g:            r.mie_g,
+        sun_intensity:    r.sun_intensity,
+        sun_disk_angle:   r.sun_disk_angle,
+        earth_radius:     r.earth_radius,
+        atm_radius:       r.atm_radius,
+        exposure:         r.exposure,
+    }
 }
 
 fn light_from_record(l: LightRecord) -> LightData {

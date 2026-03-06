@@ -108,6 +108,90 @@ impl LightData {
     }
 }
 
+/// Sky-driven ambient lighting derived from atmospheric scattering.
+///
+/// Attach to an entity (alongside `SkyAtmosphereData`) to enable sky-based
+/// ambient irradiance.  Position is irrelevant — the skylight is scene-global.
+///
+/// Mirrors `helio_render_v2::scene::Skylight`.
+#[derive(Debug, Clone)]
+pub struct SkylightData {
+    /// Multiplier applied to the computed sky ambient colour.
+    pub intensity:  f32,
+    /// Optional tint applied on top of the computed sky colour.
+    pub color_tint: [f32; 3],
+}
+
+impl Default for SkylightData {
+    fn default() -> Self {
+        Self { intensity: 1.0, color_tint: [1.0, 1.0, 1.0] }
+    }
+}
+
+impl SkylightData {
+    pub fn new() -> Self { Self::default() }
+
+    pub fn with_intensity(mut self, v: f32) -> Self { self.intensity = v; self }
+
+    pub fn with_tint(mut self, c: [f32; 3]) -> Self { self.color_tint = c; self }
+}
+
+/// Physically-based atmospheric scattering sky parameters.
+///
+/// Attach to an entity to enable atmospheric sky rendering.  Integrates with
+/// the first directional light in the scene to position the sun disc.
+///
+/// Mirrors `helio_render_v2::scene::SkyAtmosphere` (minus clouds, which are
+/// not yet exposed through Stratum).
+#[derive(Debug, Clone)]
+pub struct SkyAtmosphereData {
+    /// Per-wavelength Rayleigh scattering coefficients (R/G/B).
+    pub rayleigh_scatter: [f32; 3],
+    /// Rayleigh scale height normalised to atmosphere thickness.
+    pub rayleigh_h_scale: f32,
+    /// Mie scattering coefficient.
+    pub mie_scatter: f32,
+    /// Mie scale height.
+    pub mie_h_scale: f32,
+    /// Henyey-Greenstein asymmetry factor (-1..1).
+    pub mie_g: f32,
+    /// Sun disc intensity multiplier.
+    pub sun_intensity: f32,
+    /// Angular size of the sun disc in radians.
+    pub sun_disk_angle: f32,
+    /// Planet surface radius (km).
+    pub earth_radius: f32,
+    /// Atmosphere outer radius (km).
+    pub atm_radius: f32,
+    /// Exposure for sky tone mapping.
+    pub exposure: f32,
+}
+
+impl Default for SkyAtmosphereData {
+    fn default() -> Self {
+        Self {
+            rayleigh_scatter: [5.8e-3, 13.5e-3, 33.1e-3],
+            rayleigh_h_scale: 0.08,
+            mie_scatter:      2.1e-3,
+            mie_h_scale:      0.012,
+            mie_g:            0.76,
+            sun_intensity:    22.0,
+            sun_disk_angle:   0.0045,
+            earth_radius:     6360.0,
+            atm_radius:       6420.0,
+            exposure:         4.0,
+        }
+    }
+}
+
+impl SkyAtmosphereData {
+    pub fn new() -> Self { Self::default() }
+
+    pub fn with_sun_intensity(mut self, v: f32) -> Self { self.sun_intensity = v; self }
+    pub fn with_exposure     (mut self, v: f32) -> Self { self.exposure      = v; self }
+    pub fn with_mie_g        (mut self, v: f32) -> Self { self.mie_g         = v; self }
+}
+
 /// Camera-facing billboard sprite attached to an entity.
 ///
 /// Renders a screen-aligned quad at the entity's world position. Useful for
@@ -151,6 +235,10 @@ pub struct Components {
     /// default material (flat-shaded, unit roughness/metallic).
     pub material:        Option<MaterialHandle>,
     pub light:           Option<LightData>,
+    /// Sky-driven ambient light (scene-global; position irrelevant).
+    pub skylight:        Option<SkylightData>,
+    /// Physical atmospheric scattering sky (scene-global; position irrelevant).
+    pub sky_atmosphere:  Option<SkyAtmosphereData>,
     /// Camera-facing billboard rendered at the entity's world position.
     pub billboard:       Option<BillboardData>,
     /// Radius (metres) of the bounding sphere centred at `transform.position`.
@@ -173,8 +261,10 @@ impl Components {
     pub fn with_transform     (mut self, t: Transform)     -> Self { self.transform       = Some(t); self }
     pub fn with_mesh          (mut self, h: MeshHandle)      -> Self { self.mesh             = Some(h); self }
     pub fn with_material      (mut self, h: MaterialHandle)  -> Self { self.material         = Some(h); self }
-    pub fn with_light         (mut self, l: LightData)       -> Self { self.light            = Some(l); self }
-    pub fn with_billboard     (mut self, b: BillboardData) -> Self { self.billboard        = Some(b); self }
+    pub fn with_light          (mut self, l: LightData)          -> Self { self.light            = Some(l); self }
+    pub fn with_skylight       (mut self, s: SkylightData)       -> Self { self.skylight         = Some(s); self }
+    pub fn with_sky_atmosphere (mut self, a: SkyAtmosphereData)  -> Self { self.sky_atmosphere   = Some(a); self }
+    pub fn with_billboard      (mut self, b: BillboardData)      -> Self { self.billboard        = Some(b); self }
     pub fn with_bounding_radius(mut self, r: f32)          -> Self { self.bounding_radius  = r;       self }
     pub fn with_tag(mut self, tag: impl Into<String>) -> Self {
         self.tags.push(tag.into()); self
@@ -183,7 +273,11 @@ impl Components {
     /// Returns `true` if this entity contributes anything to a render view.
     #[inline]
     pub fn is_renderable(&self) -> bool {
-        self.mesh.is_some() || self.light.is_some() || self.billboard.is_some()
+        self.mesh.is_some()
+            || self.light.is_some()
+            || self.billboard.is_some()
+            || self.skylight.is_some()
+            || self.sky_atmosphere.is_some()
     }
 }
 

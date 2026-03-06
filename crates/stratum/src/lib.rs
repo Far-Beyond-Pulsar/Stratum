@@ -60,6 +60,7 @@ pub use partition::WorldPartition;
 pub use entity::{
     EntityId, EntityStore, Components, Transform,
     MeshHandle, MaterialHandle, LightData, BillboardData,
+    SkylightData, SkyAtmosphereData,
 };
 pub use camera::{CameraId, StratumCamera, CameraKind, Projection};
 pub use camera_registry::CameraRegistry;
