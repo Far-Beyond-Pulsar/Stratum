@@ -22,6 +22,7 @@ mod chunks;
 mod prefabs;
 mod generation;
 mod voxel_grid;
+mod player;
 mod app;
 
 fn main() {

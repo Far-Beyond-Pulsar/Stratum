@@ -33,6 +33,8 @@ pub struct VoxelChunkManager {
     use_fs:  bool,
     /// Chunks resident in the live `Level`: coord → (entity IDs, mesh handles).
     pub loaded:    HashMap<ChunkCoord, (Vec<EntityId>, Vec<MeshHandle>)>,
+    /// Solid voxel data for collision detection: coord → (x,y,z) → Block
+    pub solids:    HashMap<ChunkCoord, HashMap<(i32, i32, i32), Block>>,
     pub in_flight: HashSet<ChunkCoord>,
     pub pending_ready: Vec<StreamEvent>,
     lib:           Arc<PrefabLibrary>,
@@ -44,6 +46,7 @@ impl VoxelChunkManager {
             dir,
             use_fs,
             loaded:        HashMap::new(),
+            solids:        HashMap::new(),
             in_flight:     HashSet::new(),
             pending_ready: Vec::new(),
             lib:           Arc::new(PrefabLibrary::new()),
@@ -83,6 +86,7 @@ impl VoxelChunkManager {
                 for id in ids { level.despawn_entity(id); }
                 for mh in mesh_handles { assets.remove(mh); }
             }
+            self.solids.remove(&coord);
             level.partition_mut().remove_chunk(coord);
         }
 
@@ -131,7 +135,7 @@ impl VoxelChunkManager {
             match event {
                 StreamEvent::ChunkReady { coord, data } => {
                     self.in_flight.remove(&coord);
-                    let submeshes = build_chunk_mesh(device, data, palette);
+                    let (submeshes, solid) = build_chunk_mesh(device, data, palette);
                     let cx = coord.x as f32 * CHUNK_SIZE + CHUNK_SIZE * 0.5;
                     let cz = coord.z as f32 * CHUNK_SIZE + CHUNK_SIZE * 0.5;
                     let chunk_centre = Vec3::new(cx, CHUNK_SIZE * 0.5, cz);
@@ -153,6 +157,7 @@ impl VoxelChunkManager {
 
                     level.partition_mut().get_or_create(coord).activate();
                     self.loaded.insert(coord, (ids, mesh_handles));
+                    self.solids.insert(coord, solid);
                 }
                 StreamEvent::ChunkError { coord, error } => {
                     self.in_flight.remove(&coord);
@@ -219,7 +224,7 @@ fn build_chunk_mesh(
     device:  &wgpu::Device,
     chunk:   ChunkFile,
     palette: &MaterialPalette,
-) -> Vec<(GpuMesh, MaterialHandle)> {
+) -> (Vec<(GpuMesh, MaterialHandle)>, HashMap<(i32, i32, i32), Block>) {
     // Collect solid voxels keyed by their integer min-corner.
     let mut solid: HashMap<(i32, i32, i32), Block> = HashMap::new();
 
@@ -245,7 +250,7 @@ fn build_chunk_mesh(
             }
         }
     }
-    if solid.is_empty() { return vec![]; }
+    if solid.is_empty() { return (vec![], solid); }
 
     // Face table (same winding as GpuMesh::cube).
     #[rustfmt::skip]
@@ -297,5 +302,5 @@ fn build_chunk_mesh(
         let ix = idxs.remove(&block).unwrap_or_default();
         result.push((GpuMesh::new(device, &v, &ix), palette.handle_for(block)));
     }
-    result
+    (result, solid)
 }

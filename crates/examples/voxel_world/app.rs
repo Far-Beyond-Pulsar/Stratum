@@ -30,6 +30,7 @@ use crate::camera::*;
 use crate::chunks::VoxelChunkManager;
 use crate::materials::MaterialPalette;
 use crate::terrain::*;
+use crate::player::{Player, update_player, PLAYER_WALK_SPEED};
 
 // ── Asset loading ───────────────────────────────────────────────────────────
 
@@ -106,6 +107,7 @@ pub struct AppState {
     chunks:         VoxelChunkManager,
     streamer:       LevelStreamer,
     palette:        MaterialPalette,
+    player:         Player,         // Game mode player state
     last_frame:     std::time::Instant,
     keys:           HashSet<KeyCode>,
     cursor_grabbed: bool,
@@ -245,11 +247,14 @@ impl ApplicationHandler for App {
 
         let streamer = LevelStreamer::new();
         let chunks   = VoxelChunkManager::new(level_dir(), !self.no_fs);
+        
+        // Initialize player at spawn location
+        let player = Player::spawn_at_surface(4.0, -12.0);
 
         self.state = Some(AppState {
             window, surface, device, queue, surface_format: fmt,
             stratum, integration, main_cam_id, sky_entity_id,
-            chunks, streamer, palette,
+            chunks, streamer, palette, player,
             last_frame:     std::time::Instant::now(),
             keys:           HashSet::new(),
             cursor_grabbed: false,
@@ -288,7 +293,26 @@ impl ApplicationHandler for App {
                 physical_key: PhysicalKey::Code(KeyCode::Tab), ..
             }, .. } => {
                 state.stratum.toggle_mode();
-                log::trace!("Mode → {:?}", state.stratum.mode());
+                let is_game = matches!(state.stratum.mode(), SimulationMode::Game);
+                
+                // Switch camera kind based on mode
+                if let Some(cam) = state.stratum.cameras_mut().get_mut(state.main_cam_id) {
+                    cam.kind = if is_game {
+                        CameraKind::GameCamera { tag: "main".into() }
+                    } else {
+                        CameraKind::EditorPerspective
+                    };
+                    
+                    // When entering game mode, sync player to current camera position
+                    if is_game {
+                        state.player.position = cam.position - Vec3::new(0.0, 1.6, 0.0);
+                        state.player.yaw = cam.yaw;
+                        state.player.pitch = cam.pitch;
+                        state.player.velocity = Vec3::ZERO;
+                    }
+                }
+                
+                log::info!("Mode → {:?}", state.stratum.mode());
             }
 
             WindowEvent::KeyboardInput { event: KeyEvent {
@@ -453,19 +477,39 @@ impl AppState {
         self.frame_count += 1;
         self.fps_acc    += dt;
 
-        // Camera movement
-        {
+        // Camera/player movement based on mode
+        let is_game_mode = matches!(self.stratum.mode(), SimulationMode::Game);
+        
+        if is_game_mode {
+            // ── Game mode: player physics ──
+            
+            // Apply mouse look to player
+            self.player.yaw += self.mouse_delta.0 * LOOK_SENS;
+            self.player.pitch = (self.player.pitch - self.mouse_delta.1 * LOOK_SENS).clamp(-1.5, 1.5);
+            
+            // Run player physics with collision
+            update_player(&mut self.player, &self.keys, &self.chunks, dt, self.time);
+            
+            // Sync camera to player eye position
+            if let Some(cam) = self.stratum.cameras_mut().get_mut(self.main_cam_id) {
+                cam.position = self.player.eye_pos();
+                cam.yaw = self.player.yaw;
+                cam.pitch = self.player.pitch;
+            }
+        } else {
+            // ── Editor mode: free-fly camera ──
+            
             let cam = self.stratum.cameras_mut()
                 .get_mut(self.main_cam_id).expect("camera");
-            cam.yaw   += self.mouse_delta.0 * LOOK_SENS;
-            cam.pitch  = (cam.pitch - self.mouse_delta.1 * LOOK_SENS).clamp(-1.5, 1.5);
-            let fwd   = cam.forward();
+            cam.yaw += self.mouse_delta.0 * LOOK_SENS;
+            cam.pitch = (cam.pitch - self.mouse_delta.1 * LOOK_SENS).clamp(-1.5, 1.5);
+            let fwd = cam.forward();
             let right = cam.right();
-            if self.keys.contains(&KeyCode::KeyW)      { cam.position += fwd   * CAM_SPEED * dt; }
-            if self.keys.contains(&KeyCode::KeyS)      { cam.position -= fwd   * CAM_SPEED * dt; }
-            if self.keys.contains(&KeyCode::KeyA)      { cam.position -= right * CAM_SPEED * dt; }
-            if self.keys.contains(&KeyCode::KeyD)      { cam.position += right * CAM_SPEED * dt; }
-            if self.keys.contains(&KeyCode::Space)     { cam.position += Vec3::Y * CAM_SPEED * dt; }
+            if self.keys.contains(&KeyCode::KeyW) { cam.position += fwd * CAM_SPEED * dt; }
+            if self.keys.contains(&KeyCode::KeyS) { cam.position -= fwd * CAM_SPEED * dt; }
+            if self.keys.contains(&KeyCode::KeyA) { cam.position -= right * CAM_SPEED * dt; }
+            if self.keys.contains(&KeyCode::KeyD) { cam.position += right * CAM_SPEED * dt; }
+            if self.keys.contains(&KeyCode::Space) { cam.position += Vec3::Y * CAM_SPEED * dt; }
             if self.keys.contains(&KeyCode::ShiftLeft) { cam.position -= Vec3::Y * CAM_SPEED * dt; }
         }
         self.mouse_delta = (0.0, 0.0);
