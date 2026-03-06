@@ -378,7 +378,9 @@ impl ApplicationHandler for App {
 
 const RC_CASCADE_COUNT: usize = 4;
 const RC_HALF_EXTENTS_C0: [f32; 3] = [40.0, 20.0, 40.0]; // must match with_camera_follow() args
-const RC_CASCADE_DIMS: [u32; RC_CASCADE_COUNT] = [16, 8, 4, 2];
+// Keep probe count per cascade constant; density naturally drops because each
+// cascade covers a larger world volume.
+const RC_CASCADE_DIMS: [u32; RC_CASCADE_COUNT] = [16, 16, 16, 16];
 const RC_CASCADE_COLORS: [[f32; 4]; RC_CASCADE_COUNT] = [
     [0.10, 0.95, 1.00, 0.85], // C0: cyan
     [0.25, 1.00, 0.25, 0.78], // C1: green
