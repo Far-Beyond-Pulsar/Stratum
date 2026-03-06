@@ -154,7 +154,8 @@ impl ApplicationHandler for App {
         let renderer = Renderer::new(
             device.clone(), queue.clone(),
             RendererConfig::new(size.width, size.height, fmt, features)
-                .with_aa(AntiAliasingMode::Fxaa),
+                .with_aa(AntiAliasingMode::Taa)
+                .with_ssao(),
         ).expect("renderer");
 
         let mut integration = HelioIntegration::new(renderer, AssetRegistry::new());
