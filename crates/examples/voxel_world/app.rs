@@ -413,9 +413,9 @@ fn get_rc_probe_grid(camera_pos: Vec3) -> Vec<BillboardInstance> {
 
     // Snap origin to probe grid (same as RC feature) so the visualisation
     // stays locked to the actual probe positions.
-    let anchor_x = (camera_pos.x / cell_x).round() * cell_x;
-    let anchor_z = (camera_pos.z / cell_z).round() * cell_z;
-    let anchor_y = camera_pos.y;
+    let anchor_x = (camera_pos.x / cell_x).floor() * cell_x;
+    let anchor_y = (camera_pos.y / cell_y).floor() * cell_y;
+    let anchor_z = (camera_pos.z / cell_z).floor() * cell_z;
 
     let min_x = anchor_x - RC_HALF[0];
     let min_y = anchor_y - RC_HALF[1];
@@ -458,10 +458,11 @@ fn get_rc_bounds(camera_pos: Vec3) -> (Vec3, Vec3) {
 
     // Snap to cascade-0 probe cell size to keep GI stable while moving.
     let cell_x = (hx * 2.0) / PROBE_DIM;
+    let cell_y = (hy * 2.0) / PROBE_DIM;
     let cell_z = (hz * 2.0) / PROBE_DIM;
-    let anchor_x = (camera_pos.x / cell_x).round() * cell_x;
-    let anchor_z = (camera_pos.z / cell_z).round() * cell_z;
-    let anchor_y = camera_pos.y;
+    let anchor_x = (camera_pos.x / cell_x).floor() * cell_x;
+    let anchor_y = (camera_pos.y / cell_y).floor() * cell_y;
+    let anchor_z = (camera_pos.z / cell_z).floor() * cell_z;
 
     let min = Vec3::new(anchor_x - hx, anchor_y - hy, anchor_z - hz);
     let max = Vec3::new(anchor_x + hx, anchor_y + hy, anchor_z + hz);
