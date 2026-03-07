@@ -16,6 +16,7 @@ use stratum_helio::AssetRegistry;
 
 use crate::blocks::Block;
 use crate::materials::MaterialPalette;
+use crate::noise::hash;
 use crate::prefabs::PrefabLibrary;
 use crate::terrain::*;
 use crate::generation;
@@ -172,6 +173,7 @@ impl VoxelChunkManager {
 
 /// Regenerate terrain voxels for a chunk from procedural noise functions.
 /// This is called when loading a chunk to avoid storing terrain as entities.
+/// Includes Minecraft-like layering: bedrock, ores, beaches, and surface decorations.
 fn regenerate_chunk_terrain(
     solid: &mut HashMap<(i32, i32, i32), Block>,
     coord: ChunkCoord,
@@ -182,7 +184,7 @@ fn regenerate_chunk_terrain(
     let oz     = coord.z * VOXELS_PER_CHUNK as i32;
 
     if coord.y < 0 || coord.y >= MAX_Y_CHUNKS as i32 {
-        return; // Out of bounds
+        return;
     }
 
     for lx in 0..VOXELS_PER_CHUNK as i32 {
@@ -205,7 +207,7 @@ fn regenerate_chunk_terrain(
 
             for wy in y_lo..y_hi {
                 let block = if wy <= surface_h {
-                    surface_block(wy, surface_h, biome)
+                    surface_block(wy, surface_h, biome, wx, wz)
                 } else if biome == Biome::Taiga && wy == WATER_LEVEL {
                     Block::Ice
                 } else {
@@ -213,6 +215,36 @@ fn regenerate_chunk_terrain(
                 };
 
                 solid.insert((wx, wy, wz), block);
+            }
+
+            // ── Surface decorations ────────────────────────────────────────
+            // Only place decorations if the surface+1 is within this chunk's Y range
+            let deco_y = surface_h + 1;
+            if deco_y >= wy_min && deco_y < wy_max && surface_h >= WATER_LEVEL {
+                // Sugar cane (1-3 blocks tall, near water)
+                if sugar_cane_spot(wx, wz, surface_h, biome) {
+                    let cane_height = 1 + (hash(wx, wz, 421) * 3.0) as i32;
+                    for dy in 0..cane_height {
+                        let cy = deco_y + dy;
+                        if cy < wy_max {
+                            solid.insert((wx, cy, wz), Block::SugarCane);
+                        }
+                    }
+                }
+                // Flowers, mushrooms, pumpkins, etc.
+                else if let Some(deco) = surface_decoration(wx, wz, surface_h, biome) {
+                    solid.insert((wx, deco_y, wz), deco);
+                }
+            }
+
+            // ── Water surface decorations (lily pads) ──────────────────────
+            if surface_h < WATER_LEVEL {
+                let lily_y = WATER_LEVEL + 1;
+                if lily_y >= wy_min && lily_y < wy_max {
+                    if let Some(deco) = water_decoration(wx, wz, biome) {
+                        solid.insert((wx, lily_y, wz), deco);
+                    }
+                }
             }
         }
     }
@@ -272,7 +304,17 @@ fn build_chunk_mesh(
         let ix = idxs.entry(block).or_default();
 
         for (normal, nb, corners) in FACES {
-            if solid.contains_key(&(bx + nb[0], by + nb[1], bz + nb[2])) { continue; }
+            let nb_key = (bx + nb[0], by + nb[1], bz + nb[2]);
+            // Transparency-aware face culling:
+            //  - opaque  blocks: cull only when the neighbour is also opaque
+            //  - transparent blocks: cull only when the neighbour is the same type
+            if let Some(&nb_block) = solid.get(&nb_key) {
+                if block.is_transparent() {
+                    if nb_block == block { continue; }  // same transparent type → cull
+                } else if !nb_block.is_transparent() {
+                    continue;                           // opaque-opaque → cull
+                }
+            }
 
             let base_vert = v.len() as u32;
             let c0 = corners[0];

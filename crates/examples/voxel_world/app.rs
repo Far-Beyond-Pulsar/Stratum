@@ -65,7 +65,7 @@ fn level_dir() -> PathBuf {
 }
 
 /// Bump this key to wipe stale on-disk chunks after format changes.
-const CACHE_KEY: &str = "voxel_world_v7_multibiome";
+const CACHE_KEY: &str = "voxel_world_v8_minecraft_terrain";
 
 // ── Cache invalidation ─────────────────────────────────────────────────────
 

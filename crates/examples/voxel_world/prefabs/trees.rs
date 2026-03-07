@@ -36,11 +36,11 @@ pub fn make_oak() -> Prefab {
 
 // ── Pine ────────────────────────────────────────────────────────────────────
 
-/// Tall conifer: 7-block trunk, narrow pointed canopy.
+/// Tall conifer: 7-block spruce trunk, narrow pointed canopy with spruce leaves.
 pub fn make_pine() -> Prefab {
     let mut b = Prefab::builder("tree_pine");
     for y in 0..7_i32 {
-        b = b.with_entity(voxel_entity(-0.5, y as f32, -0.5, Block::Wood));
+        b = b.with_entity(voxel_entity(-0.5, y as f32, -0.5, Block::SpruceLog));
     }
     for dy in 0..5_i32 {
         let r: i32 = match dy { 0 => 2, 1 | 2 => 2, 3 => 1, _ => 0 };
@@ -49,13 +49,13 @@ pub fn make_pine() -> Prefab {
                 // Round off corners for the widest layers
                 if r == 2 && dx.abs() == 2 && dz.abs() == 2 { continue; }
                 b = b.with_entity(voxel_entity(
-                    dx as f32 - 0.5, (dy + 4) as f32, dz as f32 - 0.5, Block::Leaves,
+                    dx as f32 - 0.5, (dy + 4) as f32, dz as f32 - 0.5, Block::SpruceLeaves,
                 ));
             }
         }
     }
     // Top spire
-    b = b.with_entity(voxel_entity(-0.5, 9.0, -0.5, Block::Leaves));
+    b = b.with_entity(voxel_entity(-0.5, 9.0, -0.5, Block::SpruceLeaves));
     b = b.with_volume(PrefabVolume::solid(Aabb::new(
         Vec3::new(-0.5, 0.0, -0.5), Vec3::new(0.5, 7.0, 0.5),
     )));
@@ -67,12 +67,12 @@ pub fn make_pine() -> Prefab {
 
 // ── Birch ───────────────────────────────────────────────────────────────────
 
-/// Birch tree: 6-block pale trunk, 3-layer narrow canopy.
+/// Birch tree: 6-block pale birch trunk, 3-layer narrow canopy with birch leaves.
 pub fn make_birch() -> Prefab {
     let mut b = Prefab::builder("tree_birch");
-    // Tall thin trunk
+    // Tall thin trunk — birch bark
     for y in 0..6_i32 {
-        b = b.with_entity(voxel_entity(-0.5, y as f32, -0.5, Block::Wood));
+        b = b.with_entity(voxel_entity(-0.5, y as f32, -0.5, Block::BirchLog));
     }
     // Compact canopy — 3 layers, radius 1-2
     for dy in 0..3_i32 {
@@ -81,7 +81,7 @@ pub fn make_birch() -> Prefab {
             for dz in -r..=r {
                 if r == 2 && dx.abs() == 2 && dz.abs() == 2 { continue; }
                 b = b.with_entity(voxel_entity(
-                    dx as f32 - 0.5, (dy + 5) as f32, dz as f32 - 0.5, Block::Leaves,
+                    dx as f32 - 0.5, (dy + 5) as f32, dz as f32 - 0.5, Block::BirchLeaves,
                 ));
             }
         }
@@ -142,18 +142,18 @@ pub fn make_willow() -> Prefab {
 
 // ── Jungle ──────────────────────────────────────────────────────────────────
 
-/// Massive jungle tree: 10-block DarkWood trunk, wide DarkLeaves canopy, buttress roots.
+/// Massive jungle tree: 10-block jungle trunk, wide jungle leaf canopy, buttress roots.
 pub fn make_jungle_tree() -> Prefab {
     let mut b = Prefab::builder("tree_jungle");
     // Tall trunk
     for y in 0..10_i32 {
-        b = b.with_entity(voxel_entity(-0.5, y as f32, -0.5, Block::DarkWood));
+        b = b.with_entity(voxel_entity(-0.5, y as f32, -0.5, Block::JungleLog));
     }
     // Buttress roots — flared base
     for &(dx, dz) in &[(1, 0), (-1, 0), (0, 1), (0, -1)] {
         for y in 0..2_i32 {
             b = b.with_entity(voxel_entity(
-                dx as f32 - 0.5, y as f32, dz as f32 - 0.5, Block::DarkWood,
+                dx as f32 - 0.5, y as f32, dz as f32 - 0.5, Block::JungleLog,
             ));
         }
     }
@@ -164,7 +164,7 @@ pub fn make_jungle_tree() -> Prefab {
             for dz in -r..=r {
                 if r == 3 && dx.abs() == 3 && dz.abs() == 3 { continue; }
                 b = b.with_entity(voxel_entity(
-                    dx as f32 - 0.5, (dy + 8) as f32, dz as f32 - 0.5, Block::DarkLeaves,
+                    dx as f32 - 0.5, (dy + 8) as f32, dz as f32 - 0.5, Block::JungleLeaves,
                 ));
             }
         }

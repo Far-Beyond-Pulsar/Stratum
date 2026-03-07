@@ -2,7 +2,7 @@
 
 use crate::biomes::Biome;
 use crate::blocks::Block;
-use crate::noise::smooth_noise;
+use crate::noise::{smooth_noise, hash};
 
 // ── World constants ─────────────────────────────────────────────────────────
 
@@ -57,29 +57,187 @@ pub fn terrain_height(wx: i32, wz: i32) -> i32 {
 }
 
 /// Choose the terrain block at height `wy` given surface height and biome.
-pub fn surface_block(wy: i32, surface_h: i32, biome: Biome) -> Block {
-    // High-altitude bare stone / snow
+/// Includes bedrock, ore veins, beach zones, and biome-specific surfaces.
+pub fn surface_block(wy: i32, surface_h: i32, biome: Biome, wx: i32, wz: i32) -> Block {
+    // ── Bedrock layer (y=0 always, y=1-2 mixed) ────────────────────────────
+    if wy == 0 {
+        return Block::Bedrock;
+    }
+    if wy <= 2 {
+        let h = hash(wx, wz, 200 + wy as u64);
+        if h < 0.5 - (wy as f32 * 0.15) {
+            return Block::Bedrock;
+        }
+    }
+
+    // ── High-altitude bare stone / snow ─────────────────────────────────────
     if wy > 22 && wy >= surface_h - 1 {
         return if biome == Biome::Mountains && wy > 30 { Block::Snow } else { Block::Stone };
     }
 
+    // ── Beach zone: sand near water level ───────────────────────────────────
+    let is_beach = is_beach_zone(wx, wz, surface_h, biome);
+
     if wy == surface_h {
+        if is_beach {
+            return Block::Sand;
+        }
         match biome {
-            Biome::Plains | Biome::Forest | Biome::Jungle => Block::Grass,
-            Biome::Taiga      => Block::Snow,
-            Biome::Desert     => Block::Sand,
-            Biome::Swamp      => Block::Clay,
-            Biome::Mountains  => if wy > 25 { Block::Snow } else { Block::Stone },
+            Biome::Plains | Biome::Forest => Block::Grass,
+            Biome::Jungle => Block::Grass,
+            Biome::Taiga  => Block::Podzol,
+            Biome::Desert => Block::Sand,
+            Biome::Swamp  => Block::Clay,
+            Biome::Mountains => if wy > 25 { Block::Snow } else { Block::Stone },
         }
     } else if wy >= surface_h - 2 {
+        // ── Subsurface (2 blocks below surface) ────────────────────────────
+        if is_beach {
+            return if wy == surface_h - 1 { Block::Sand } else { Block::Sandstone };
+        }
         match biome {
             Biome::Desert => Block::Sandstone,
             Biome::Swamp  => Block::Clay,
             _             => Block::Dirt,
         }
     } else {
-        Block::Stone
+        // ── Underground: stone with ore veins ──────────────────────────────
+        ore_or_stone(wx, wy, wz)
     }
+}
+
+// ── Beach detection ─────────────────────────────────────────────────────────
+
+/// True if this column should be a sand beach (near water, low elevation, not desert/taiga).
+pub fn is_beach_zone(wx: i32, wz: i32, surface_h: i32, biome: Biome) -> bool {
+    // Desert is already sand, taiga has snow shores, mountains are rocky
+    if matches!(biome, Biome::Desert | Biome::Taiga | Biome::Mountains) {
+        return false;
+    }
+    // Beach: surface within 2 blocks of water level
+    if surface_h > WATER_LEVEL + 2 || surface_h < WATER_LEVEL - 1 {
+        return false;
+    }
+    // Check if there's water nearby (any adjacent column below water level)
+    for &(dx, dz) in &[(2, 0), (-2, 0), (0, 2), (0, -2), (3, 0), (-3, 0), (0, 3), (0, -3)] {
+        let nh = terrain_height(wx + dx, wz + dz);
+        if nh < WATER_LEVEL {
+            return true;
+        }
+    }
+    false
+}
+
+// ── Ore generation ──────────────────────────────────────────────────────────
+
+/// Returns an ore block or stone based on position-seeded noise.
+/// Mimics Minecraft ore distribution at compressed world heights.
+fn ore_or_stone(wx: i32, wy: i32, wz: i32) -> Block {
+    let h = hash(wx.wrapping_mul(13) ^ wy.wrapping_mul(7), wz.wrapping_mul(19) ^ wy, 300);
+
+    // Gravel veins (any depth, ~2% chance)
+    if h < 0.020 {
+        return Block::Gravel;
+    }
+
+    // Coal ore (y=0-20, ~3% chance)
+    if wy <= 20 && h < 0.050 {
+        return Block::CoalOre;
+    }
+
+    // Iron ore (y=0-15, ~1.8% chance)
+    if wy <= 15 && h < 0.068 {
+        return Block::IronOre;
+    }
+
+    // Gold ore (y=0-8, ~0.6% chance)
+    if wy <= 8 && h < 0.074 {
+        return Block::GoldOre;
+    }
+
+    // Diamond ore (y=0-5, ~0.3% chance)
+    if wy <= 5 && h < 0.077 {
+        return Block::DiamondOre;
+    }
+
+    // Obsidian (y=0-3, very rare ~0.1%)
+    if wy <= 3 && h < 0.078 {
+        return Block::Obsidian;
+    }
+
+    Block::Stone
+}
+
+// ── Surface decoration queries ──────────────────────────────────────────────
+
+/// Returns a decoration block to place on top of the surface, or None.
+pub fn surface_decoration(wx: i32, wz: i32, surface_h: i32, biome: Biome) -> Option<Block> {
+    if is_beach_zone(wx, wz, surface_h, biome) { return None; }
+    if surface_h < WATER_LEVEL { return None; }
+    if biome == Biome::Mountains && surface_h > 25 { return None; }
+
+    let h = hash(wx, wz, 400);
+    let h2 = hash(wx, wz, 401);
+
+    match biome {
+        Biome::Plains => {
+            if h < 0.015 { return Some(Block::Poppy); }
+            if h < 0.030 { return Some(Block::Dandelion); }
+            if h < 0.005 && h2 > 0.5 { return Some(Block::Pumpkin); }
+            None
+        }
+        Biome::Forest => {
+            if h < 0.020 { return Some(Block::Poppy); }
+            if h < 0.035 { return Some(Block::Dandelion); }
+            if h < 0.050 && h2 < 0.5 { return Some(Block::BrownMushroom); }
+            if h < 0.055 { return Some(Block::RedMushroom); }
+            None
+        }
+        Biome::Jungle => {
+            if h < 0.012 { return Some(Block::Melon); }
+            if h < 0.025 { return Some(Block::BrownMushroom); }
+            None
+        }
+        Biome::Swamp => {
+            if h < 0.030 { return Some(Block::BrownMushroom); }
+            if h < 0.045 { return Some(Block::RedMushroom); }
+            None
+        }
+        Biome::Desert => {
+            if h < 0.035 { return Some(Block::DeadBush); }
+            None
+        }
+        Biome::Taiga => {
+            if h < 0.020 { return Some(Block::BrownMushroom); }
+            if h < 0.030 { return Some(Block::RedMushroom); }
+            None
+        }
+        Biome::Mountains => None,
+    }
+}
+
+/// Returns a water-surface decoration (lily pad), or None.
+pub fn water_decoration(wx: i32, wz: i32, biome: Biome) -> Option<Block> {
+    if biome != Biome::Swamp { return None; }
+    let h = hash(wx, wz, 410);
+    if h < 0.08 { Some(Block::LilyPad) } else { None }
+}
+
+/// Check if sugar cane should be placed at this position.
+pub fn sugar_cane_spot(wx: i32, wz: i32, surface_h: i32, biome: Biome) -> bool {
+    if matches!(biome, Biome::Desert | Biome::Mountains | Biome::Taiga) {
+        return false;
+    }
+    if surface_h != WATER_LEVEL && surface_h != WATER_LEVEL + 1 {
+        return false;
+    }
+    let has_water = [(1, 0), (-1, 0), (0, 1), (0, -1)].iter().any(|&(dx, dz)| {
+        terrain_height(wx + dx, wz + dz) < WATER_LEVEL
+    });
+    if !has_water { return false; }
+
+    let h = hash(wx, wz, 420);
+    h < 0.06
 }
 
 // ── Biome-layer noise queries ───────────────────────────────────────────────

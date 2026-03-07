@@ -109,11 +109,17 @@ pub fn place_trees_in_chunk(
                 let threshold = FOREST_TREE_SPOT_MIN - (forest_noise_at(gx as f32, gz as f32) - 0.3) * 0.35;
                 if spot > threshold || biome == Biome::Desert {
                     let h = terrain_height(gx, gz);
-                    if h >= BASE_HEIGHT && h <= STRUCTURE_HEIGHT_CUTOFF {
-                        if let Some(tree) = select_tree(gx, gz, biome, lib) {
-                            let world_pos = Vec3::new(gx as f32, h as f32 + 1.0, gz as f32);
-                            if ctx.place(tree, world_pos, &mut scratch).is_ok() {
-                                emit_prefab_entities(tree, world_pos, entities, eid);
+                    // Trees must be above water level (except cactus can be at water level in desert)
+                    let min_height = if biome == Biome::Desert { WATER_LEVEL } else { WATER_LEVEL + 1 };
+                    if h >= min_height && h <= STRUCTURE_HEIGHT_CUTOFF {
+                        // Don't place trees on sand beaches
+                        let on_beach = crate::terrain::is_beach_zone(gx, gz, h, biome);
+                        if !on_beach {
+                            if let Some(tree) = select_tree(gx, gz, biome, lib) {
+                                let world_pos = Vec3::new(gx as f32, h as f32 + 1.0, gz as f32);
+                                if ctx.place(tree, world_pos, &mut scratch).is_ok() {
+                                    emit_prefab_entities(tree, world_pos, entities, eid);
+                                }
                             }
                         }
                     }
