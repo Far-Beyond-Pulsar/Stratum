@@ -46,8 +46,15 @@ pub fn render_view_to_scene(
             if let Some(gpu_mesh) = assets.get(mesh_handle) {
                 // compute world transform if available (default identity)
                 let transform = components
-                    .transform
-                    .map(|t| t.to_mat4())
+                    .transform.clone()
+                    .map(|t| {
+                        // build matrix from position/rotation/scale
+                        glam::Mat4::from_scale_rotation_translation(
+                            t.scale,
+                            t.rotation,
+                            t.position,
+                        )
+                    })
                     .unwrap_or_else(|| glam::Mat4::IDENTITY);
 
                 // Use PBR material bind group when the entity has one registered.
