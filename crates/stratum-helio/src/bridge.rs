@@ -1,13 +1,17 @@
-//! Translation layer: Stratum `RenderView` + `EntityStore` → Helio `Scene` + `Camera`.
+//! Translation layer: Stratum `RenderView` + `EntityStore` → Helio `SceneEnv` + `Camera`.
 //!
 //! These are pure, side-effect-free functions. All GPU state is owned by
 //! `HelioIntegration`; this module only converts data shapes.
+//!
+//! Note: mesh objects are **not** built here. `HelioIntegration` registers them
+//! once via `add_object` and removes them via `remove_object`; transforms are
+//! updated each frame via `update_transform`. This function only produces the
+//! per-frame environment: lights, sky, ambient, and billboards.
 
 use stratum::{RenderView, EntityStore, LightData, SkylightData, SkyAtmosphereData};
-use helio_render_v2::{Camera, Scene, SceneLight};
+use helio_render_v2::{Camera, SceneEnv, SceneLight};
 use helio_render_v2::scene::{Skylight, SkyAtmosphere};
 use helio_render_v2::features::BillboardInstance;
-use crate::asset_registry::AssetRegistry;
 
 // ── Camera ────────────────────────────────────────────────────────────────────
 
@@ -19,115 +23,79 @@ pub fn render_view_to_camera(view: &RenderView) -> Camera {
     Camera::new(view.view_proj, view.camera_position, view.time)
 }
 
-// ── Scene ─────────────────────────────────────────────────────────────────────
+// ── Scene environment ─────────────────────────────────────────────────────────
 
-/// Build a Helio `Scene` from the entities visible in a `RenderView`.
+/// Build a per-frame Helio `SceneEnv` from the entities visible in a `RenderView`.
 ///
-/// Iterates `view.visible_entities`, looks each one up in `store`, and
-/// emits mesh objects and lights. Entities missing either a transform or a
-/// renderable component are silently skipped.
-pub fn render_view_to_scene(
-    view:   &RenderView,
-    store:  &EntityStore,
-    assets: &AssetRegistry,
-) -> Scene {
-    let mut scene = Scene::new();
+/// Iterates `view.visible_entities` and collects lights, billboards, and
+/// scene-global sky data. Mesh geometry is **not** emitted here — that is
+/// handled by `HelioIntegration::sync_entity_objects` which maintains a
+/// persistent `add_object` registry. Entities missing required components are
+/// silently skipped.
+pub fn render_view_to_scene_env(
+    view:  &RenderView,
+    store: &EntityStore,
+) -> SceneEnv {
+    let mut lights         = Vec::new();
+    let mut billboards     = Vec::new();
+    let mut sky_atmosphere = None;
+    let mut skylight       = None;
 
     log::debug!(
-        "render_view_to_scene: {} visible entities",
+        "render_view_to_scene_env: {} visible entities",
         view.visible_entities.len()
     );
 
     for &entity_id in &view.visible_entities {
         let Some(components) = store.get(entity_id) else { continue };
 
-        // ── Mesh ──────────────────────────────────────────────────────────────
-        if let Some(mesh_handle) = components.mesh {
-            if let Some(gpu_mesh) = assets.get(mesh_handle) {
-                // compute world transform if available (default identity)
-                let transform = components
-                    .transform.clone()
-                    .map(|t| {
-                        // build matrix from position/rotation/scale
-                        glam::Mat4::from_scale_rotation_translation(
-                            t.scale,
-                            t.rotation,
-                            t.position,
-                        )
-                    })
-                    .unwrap_or_else(|| glam::Mat4::IDENTITY);
-
-                // Use PBR material bind group when the entity has one registered.
-                if let Some(mat_handle) = components.material {
-                    if let Some(gpu_mat) = assets.get_material(mat_handle) {
-                        scene = scene.add_object_with_material_transform(
-                            gpu_mesh.clone(),
-                            gpu_mat.clone(),
-                            transform,
-                        );
-                    } else {
-                        log::warn!(
-                            "Entity {:?} references unregistered MaterialHandle({:?})",
-                            entity_id, mat_handle
-                        );
-                        scene = scene.add_object_transform(gpu_mesh.clone(), transform);
-                    }
-                } else {
-                    scene = scene.add_object_transform(gpu_mesh.clone(), transform);
-                }
-            } else {
-                log::warn!(
-                    "Entity {:?} references unregistered MeshHandle({:?})",
-                    entity_id, mesh_handle
-                );
-            }
-        }
-
         // ── Light ─────────────────────────────────────────────────────────────
         if let (Some(light_data), Some(transform)) =
             (&components.light, &components.transform)
         {
-            let scene_light = stratum_light_to_scene_light(
+            lights.push(stratum_light_to_scene_light(
                 light_data,
                 transform.position.to_array(),
-            );
-            scene = scene.add_light(scene_light);
+            ));
         }
 
         // ── Billboard ─────────────────────────────────────────────────────────
         if let (Some(billboard), Some(transform)) =
             (&components.billboard, &components.transform)
         {
-            let bb = BillboardInstance::new(
-                transform.position.to_array(),
-                billboard.size,
-            )
-            .with_color(billboard.color)
-            .with_screen_scale(billboard.screen_scale);
-            scene = scene.add_billboard(bb);
+            billboards.push(
+                BillboardInstance::new(transform.position.to_array(), billboard.size)
+                    .with_color(billboard.color)
+                    .with_screen_scale(billboard.screen_scale),
+            );
         }
 
         // ── Skylight / Sky Atmosphere ────────────────────────────────────────
         // Scene-global: first entity with these components wins.
-        if let Some(sky_atm) = &components.sky_atmosphere {
-            if scene.sky_atmosphere.is_none() {
-                scene = scene.with_sky_atmosphere(stratum_sky_atmosphere_to_helio(sky_atm));
+        if sky_atmosphere.is_none() {
+            if let Some(sky_atm) = &components.sky_atmosphere {
+                sky_atmosphere = Some(stratum_sky_atmosphere_to_helio(sky_atm));
             }
         }
-        if let Some(sl) = &components.skylight {
-            if scene.skylight.is_none() {
-                scene = scene.with_skylight(stratum_skylight_to_helio(sl));
+        if skylight.is_none() {
+            if let Some(sl) = &components.skylight {
+                skylight = Some(stratum_skylight_to_helio(sl));
             }
         }
     }
 
     log::debug!(
-        "render_view_to_scene: {} objects {} lights in scene",
-        scene.objects.len(),
-        scene.lights.len()
+        "render_view_to_scene_env: {} lights {} billboards",
+        lights.len(), billboards.len()
     );
 
-    scene
+    SceneEnv {
+        lights,
+        billboards,
+        sky_atmosphere,
+        skylight,
+        ..Default::default()
+    }
 }
 
 // ── Skylight / Sky Atmosphere conversion ──────────────────────────────────────
@@ -178,10 +146,9 @@ mod tests {
     use super::*;
     use glam::{Mat4, Vec3};
     use stratum::camera::CameraId;
-    use stratum::entity::{Components, EntityId, EntityStore, LightData, MeshHandle, Transform};
+    use stratum::entity::{Components, EntityId, EntityStore, LightData, Transform};
     use stratum::render_view::{RenderTargetHandle, Viewport};
     use stratum::RenderView;
-    use crate::asset_registry::AssetRegistry;
 
     fn make_render_view(view_proj: Mat4, pos: Vec3) -> RenderView {
         RenderView {
@@ -225,38 +192,19 @@ mod tests {
         assert!((cam.time - 1.234).abs() < 1e-6);
     }
 
-    // ── render_view_to_scene ──────────────────────────────────────────────────
+    // ── render_view_to_scene_env ──────────────────────────────────────────────
 
     #[test]
-    fn scene_is_empty_when_no_visible_entities() {
-        let mut store  = EntityStore::new();
-        let _id        = store.spawn(Components::new().with_mesh(MeshHandle(1)));
-        let assets     = AssetRegistry::new();
-        let rv         = make_render_view(Mat4::IDENTITY, Vec3::ZERO);
-        // visible_entities is empty → scene should have no objects
-        let scene = render_view_to_scene(&rv, &store, &assets);
-        assert!(scene.objects.is_empty());
+    fn scene_env_has_no_lights_when_no_visible_entities() {
+        let store  = EntityStore::new();
+        let rv     = make_render_view(Mat4::IDENTITY, Vec3::ZERO);
+        let env    = render_view_to_scene_env(&rv, &store);
+        assert!(env.lights.is_empty());
+        assert!(env.billboards.is_empty());
     }
 
     #[test]
-    fn scene_skips_unregistered_mesh_handle() {
-        let mut store  = EntityStore::new();
-        let id         = store.spawn(
-            Components::new()
-                .with_transform(Transform::from_position(Vec3::ZERO))
-                .with_mesh(MeshHandle(999)), // not in AssetRegistry
-        );
-        let assets  = AssetRegistry::new();
-        let rv      = RenderView {
-            visible_entities: vec![id],
-            ..make_render_view(Mat4::IDENTITY, Vec3::ZERO)
-        };
-        let scene = render_view_to_scene(&rv, &store, &assets);
-        assert!(scene.objects.is_empty());
-    }
-
-    #[test]
-    fn scene_includes_light_for_light_entity() {
+    fn scene_env_includes_light_for_light_entity() {
         let mut store = EntityStore::new();
         let id        = store.spawn(
             Components::new()
@@ -265,26 +213,23 @@ mod tests {
                     color: [1.0, 0.5, 0.0], intensity: 5.0, range: 8.0,
                 }),
         );
-        let assets = AssetRegistry::new();
-        let rv     = RenderView {
+        let rv  = RenderView {
             visible_entities: vec![id],
             ..make_render_view(Mat4::IDENTITY, Vec3::ZERO)
         };
-        let scene = render_view_to_scene(&rv, &store, &assets);
-        assert_eq!(scene.lights.len(), 1);
+        let env = render_view_to_scene_env(&rv, &store);
+        assert_eq!(env.lights.len(), 1);
     }
 
     #[test]
-    fn scene_entity_missing_from_store_is_silently_skipped() {
-        let store   = EntityStore::new(); // empty
-        let assets  = AssetRegistry::new();
-        let rv      = RenderView {
+    fn scene_env_entity_missing_from_store_is_silently_skipped() {
+        let store = EntityStore::new(); // empty
+        let rv    = RenderView {
             visible_entities: vec![EntityId::new(42)],
             ..make_render_view(Mat4::IDENTITY, Vec3::ZERO)
         };
         // Should not panic
-        let scene = render_view_to_scene(&rv, &store, &assets);
-        assert!(scene.objects.is_empty());
-        assert!(scene.lights.is_empty());
+        let env = render_view_to_scene_env(&rv, &store);
+        assert!(env.lights.is_empty());
     }
 }

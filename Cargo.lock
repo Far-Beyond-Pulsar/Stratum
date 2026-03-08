@@ -898,7 +898,7 @@ dependencies = [
 [[package]]
 name = "helio-live-portal"
 version = "0.1.0"
-source = "git+https://github.com/Far-Beyond-Pulsar/Helio?rev=6f0fda86c6e55639b1bdb7defdf029ab828cef6d#6f0fda86c6e55639b1bdb7defdf029ab828cef6d"
+source = "git+https://github.com/Far-Beyond-Pulsar/Helio?rev=7adbb00431dfd0d8a44177cdbfb1146259e02f33#7adbb00431dfd0d8a44177cdbfb1146259e02f33"
 dependencies = [
  "axum",
  "serde",
@@ -909,7 +909,7 @@ dependencies = [
 [[package]]
 name = "helio-render-v2"
 version = "0.1.8"
-source = "git+https://github.com/Far-Beyond-Pulsar/Helio?rev=6f0fda86c6e55639b1bdb7defdf029ab828cef6d#6f0fda86c6e55639b1bdb7defdf029ab828cef6d"
+source = "git+https://github.com/Far-Beyond-Pulsar/Helio?rev=7adbb00431dfd0d8a44177cdbfb1146259e02f33#7adbb00431dfd0d8a44177cdbfb1146259e02f33"
 dependencies = [
  "bitflags 2.11.0",
  "bytemuck",

@@ -4,10 +4,13 @@
 //! Each frame, the host calls `submit_frame()` with the `Vec<RenderView>`
 //! produced by `Stratum::build_views()`. For each view the integration:
 //!
-//! 1. Resolves `RenderTargetHandle` → `&wgpu::TextureView`.
-//! 2. Builds a Helio `Scene` from the visible entities.
+//! 1. Syncs the persistent object registry: adds new entities via `add_object`,
+//!    removes gone entities via `remove_object`, updates transforms via
+//!    `update_transform`.
+//! 2. Builds a per-frame `SceneEnv` (lights, sky, billboards) from visible
+//!    entities.
 //! 3. Builds a Helio `Camera` from the view matrices.
-//! 4. Calls `renderer.render_scene()`.
+//! 4. Calls `renderer.set_scene_env()` + `renderer.render()`.
 //!
 //! ## Render target resolution
 //!
@@ -22,18 +25,22 @@ use std::collections::HashMap;
 
 use glam::{Quat, Vec3};
 use stratum::{ChunkState, EntityStore, Level, LightData, RenderTargetHandle, RenderView, WorldPartition};
-use helio_render_v2::Renderer;
+use stratum::entity::EntityId;
+use helio_render_v2::{ObjectId, Renderer};
 
 use helio_render_v2::features::BillboardInstance;
 
 use crate::asset_registry::AssetRegistry;
-use crate::bridge::{render_view_to_camera, render_view_to_scene};
+use crate::bridge::{render_view_to_camera, render_view_to_scene_env};
 
 /// Owns the Helio renderer and the mesh asset registry, and drives render
 /// submission for each frame.
 pub struct HelioIntegration {
     renderer:         Renderer,
     assets:           AssetRegistry,
+    /// Persistent per-entity Helio object IDs. Populated by `sync_entity_objects`;
+    /// entries survive across frames for as long as the entity exists in the level.
+    entity_objects:   HashMap<EntityId, ObjectId>,
     /// Named offscreen render targets. Populated by the host when
     /// `RenderTargetHandle::OffscreenTexture` cameras are in use.
     offscreen_views:  HashMap<String, wgpu::TextureView>,
@@ -44,7 +51,7 @@ pub struct HelioIntegration {
 
 impl HelioIntegration {
     pub fn new(renderer: Renderer, assets: AssetRegistry) -> Self {
-        Self { renderer, assets, offscreen_views: HashMap::new(), extra_billboards: Vec::new() }
+        Self { renderer, assets, entity_objects: HashMap::new(), offscreen_views: HashMap::new(), extra_billboards: Vec::new() }
     }
 
     // ── Accessors ─────────────────────────────────────────────────────────────
@@ -90,7 +97,55 @@ impl HelioIntegration {
     pub fn clear_extra_billboards(&mut self) {
         self.extra_billboards.clear();
     }
+    // ── Object registry sync ──────────────────────────────────────────────────────
 
+    /// Synchronise the Helio persistent proxy registry against the current
+    /// level entity store.
+    ///
+    /// * New mesh entities → `add_object` (allocates a GPU instance buffer).
+    /// * Gone entities    → `remove_object` (drops the GPU buffer).
+    /// * Existing entities → `update_transform` (zero-cost when unchanged).
+    pub fn sync_entity_objects(&mut self, store: &EntityStore) {
+        // ── Remove objects for entities that are no longer in the store ───────
+        let gone: Vec<EntityId> = self.entity_objects.keys()
+            .filter(|&&id| {
+                store.get(id).map_or(true, |c| c.mesh.is_none())
+            })
+            .copied()
+            .collect();
+        for id in gone {
+            if let Some(obj_id) = self.entity_objects.remove(&id) {
+                self.renderer.remove_object(obj_id);
+            }
+        }
+
+        // ── Add or update objects for all mesh-bearing entities ───────────
+        for (entity_id, components) in store.iter() {
+            let Some(mesh_handle) = components.mesh else { continue };
+
+            let transform = components.transform.as_ref()
+                .map(|t| glam::Mat4::from_scale_rotation_translation(t.scale, t.rotation, t.position))
+                .unwrap_or(glam::Mat4::IDENTITY);
+
+            if let Some(&obj_id) = self.entity_objects.get(&entity_id) {
+                // Already registered — just sync the transform.
+                self.renderer.update_transform(obj_id, transform);
+            } else {
+                // New entity: register a persistent proxy.
+                if let Some(gpu_mesh) = self.assets.get(mesh_handle) {
+                    let material = components.material
+                        .and_then(|mh| self.assets.get_material(mh));
+                    let obj_id = self.renderer.add_object(gpu_mesh, material, transform);
+                    self.entity_objects.insert(entity_id, obj_id);
+                } else {
+                    log::warn!(
+                        "Entity {:?} references unregistered MeshHandle({:?}) — skipped",
+                        entity_id, mesh_handle
+                    );
+                }
+            }
+        }
+    }
     // ── Lifecycle ─────────────────────────────────────────────────────────────
 
     /// Notify the renderer that the output surface was resized.
@@ -189,41 +244,56 @@ impl HelioIntegration {
     ) -> helio_render_v2::Result<()> {
         let store = level.entities();
 
-        for view in views {
-            // ── Translate to Helio types ──────────────────────────────────────
-            let mut scene = render_view_to_scene(view, store, &self.assets);
-            let camera    = render_view_to_camera(view);
+        // Sync persistent mesh objects once per frame (add / remove / update).
+        self.sync_entity_objects(store);
 
-            // Merge extra billboards (probe vis, etc.) into the scene.
+        for view in views {
+            // ── Build per-frame environment (lights, sky, billboards) ─────────
+            let mut env = render_view_to_scene_env(view, store);
+            let camera  = render_view_to_camera(view);
+
+            // Merge extra billboards (probe vis, etc.) into the env.
             if !self.extra_billboards.is_empty() {
-                scene.billboards.extend(self.extra_billboards.iter().cloned());
+                env.billboards.extend(self.extra_billboards.iter().cloned());
             }
 
-            // ── Resolve render target then submit ─────────────────────────────
-            let result = match &view.render_target {
-                RenderTargetHandle::PrimarySurface => {
-                    self.renderer.render_scene(&scene, &camera, primary_surface, delta_time)
+            // Resolve offscreen target name before borrowing renderer mutably.
+            let offscreen_name: Option<String> = match &view.render_target {
+                RenderTargetHandle::OffscreenTexture(name)
+                    if self.offscreen_views.contains_key(name.as_str()) =>
+                {
+                    Some(name.clone())
                 }
+                _ => None,
+            };
+
+            // ── Submit ────────────────────────────────────────────────────────
+            self.renderer.set_scene_env(env);
+
+            if let Some(ref name) = offscreen_name {
+                if let Some(offscreen) = self.offscreen_views.get(name.as_str()) {
+                    self.renderer.render(&camera, offscreen, delta_time)?;
+                    continue;
+                }
+            }
+
+            // Warn for unresolved targets and fall back to primary surface.
+            match &view.render_target {
                 RenderTargetHandle::OffscreenTexture(name) => {
-                    if let Some(offscreen) = self.offscreen_views.get(name.as_str()) {
-                        self.renderer.render_scene(&scene, &camera, offscreen, delta_time)
-                    } else {
-                        log::warn!(
-                            "Unresolved offscreen texture '{}' — routing to primary surface",
-                            name
-                        );
-                        self.renderer.render_scene(&scene, &camera, primary_surface, delta_time)
-                    }
+                    log::warn!(
+                        "Unresolved offscreen texture '{}' — routing to primary surface",
+                        name
+                    );
                 }
+                RenderTargetHandle::PrimarySurface => {}
                 other => {
                     log::warn!(
                         "Unresolved render target {:?} — routing to primary surface",
                         other
                     );
-                    self.renderer.render_scene(&scene, &camera, primary_surface, delta_time)
                 }
-            };
-            result?;
+            }
+            self.renderer.render(&camera, primary_surface, delta_time)?;
         }
 
         Ok(())

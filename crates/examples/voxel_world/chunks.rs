@@ -296,6 +296,14 @@ fn build_chunk_mesh(
     ];
     const UVS: [[f32; 2]; 4] = [[0., 0.], [1., 0.], [1., 1.], [0., 1.]];
 
+    // Mesh vertices are stored in local space relative to chunk_centre so that
+    // the instance model matrix (a translation by chunk_centre) maps them back
+    // to the correct world position.  This must match the Transform used when
+    // spawning the entity in flush_events.
+    let chunk_cx = coord.x as f32 * CHUNK_SIZE + CHUNK_SIZE * 0.5;
+    let chunk_cy = CHUNK_SIZE * 0.5;
+    let chunk_cz = coord.z as f32 * CHUNK_SIZE + CHUNK_SIZE * 0.5;
+
     let mut verts: HashMap<Block, Vec<PackedVertex>> = HashMap::new();
     let mut idxs:  HashMap<Block, Vec<u32>>          = HashMap::new();
 
@@ -325,7 +333,11 @@ fn build_chunk_mesh(
 
             for (ci, corner) in corners.iter().enumerate() {
                 v.push(PackedVertex::new_with_tangent(
-                    [bx as f32 + corner[0], by as f32 + corner[1], bz as f32 + corner[2]],
+                    [
+                        bx as f32 + corner[0] - chunk_cx,
+                        by as f32 + corner[1] - chunk_cy,
+                        bz as f32 + corner[2] - chunk_cz,
+                    ],
                     *normal,
                     UVS[ci],
                     tangent,
