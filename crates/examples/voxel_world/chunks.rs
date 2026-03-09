@@ -26,6 +26,10 @@ use crate::biomes::{self, Biome};
 const MAX_REQUESTS_PER_FRAME: usize = 6;
 /// Max completed chunk events processed (mesh uploads) per frame.
 const MAX_UPLOADS_PER_FRAME: usize = 4;
+/// Maximum number of dormant (out-of-view) chunks whose GPU resources are kept
+/// alive for instant re-activation.  Entries above this limit are hard-evicted,
+/// triggering the full despawn + GPU-free path.
+const DORMANT_CAP: usize = 256;
 
 // ── VoxelChunkManager ───────────────────────────────────────────────────────
 
@@ -39,6 +43,20 @@ pub struct VoxelChunkManager {
     pub in_flight: HashSet<ChunkCoord>,
     pub pending_ready: Vec<StreamEvent>,
     lib:           Arc<PrefabLibrary>,
+    /// GPU-resident meshes for recently-evicted chunks.
+    ///
+    /// When a chunk leaves the load radius it is moved here instead of being
+    /// destroyed.  The Stratum chunk is removed from the partition so
+    /// `active_entities()` no longer returns those entity IDs — causing
+    /// `sync_entity_objects` to call `disable_object` for them (zero GPU cost).
+    ///
+    /// On re-entry the chunk is re-associated with its entity IDs and
+    /// re-activated.  `sync_entity_objects` then calls `enable_object` instead
+    /// of `add_object`, skipping mesh re-upload entirely.
+    ///
+    /// Entries above `DORMANT_CAP` are hard-evicted via the full
+    /// `despawn_entity` + `assets.remove` path.
+    dormant: HashMap<ChunkCoord, (Vec<EntityId>, Vec<MeshHandle>)>,
 }
 
 impl VoxelChunkManager {
@@ -51,6 +69,7 @@ impl VoxelChunkManager {
             in_flight:     HashSet::new(),
             pending_ready: Vec::new(),
             lib:           Arc::new(PrefabLibrary::new()),
+            dormant:       HashMap::new(),
         }
     }
 
@@ -77,23 +96,77 @@ impl VoxelChunkManager {
     ) {
         let desired = self.desired_set(cam);
 
-        // Evict chunks no longer in view
+        // ── Evict out-of-range chunks → dormant cache ─────────────────────────
+        // Entities and GPU meshes are kept alive; only the partition chunk entry
+        // is removed so `active_entities()` stops returning those IDs.
+        // `sync_entity_objects` will call `disable_object` — zero GPU cost.
         let evict: Vec<ChunkCoord> = self.loaded.keys()
             .filter(|c| !desired.contains(c))
             .copied()
             .collect();
         for coord in evict {
-            if let Some((ids, mesh_handles)) = self.loaded.remove(&coord) {
-                for id in ids { level.despawn_entity(id); }
-                for mh in mesh_handles { assets.remove(mh); }
+            if let Some(entry) = self.loaded.remove(&coord) {
+                self.dormant.insert(coord, entry);
             }
             self.solids.remove(&coord);
+            // Removing the partition chunk unlinks entity IDs from this chunk;
+            // those entities stay alive in the store but `active_entities()`
+            // will no longer include them until the chunk is re-created.
             level.partition_mut().remove_chunk(coord);
         }
 
-        // Request new chunks sorted by distance
+        // ── Enforce dormant capacity ──────────────────────────────────────────
+        // When the cache exceeds its limit, hard-evict the oldest entries:
+        // free GPU buffers and despawn entities from the Level.
+        if self.dormant.len() > DORMANT_CAP {
+            let n_excess = self.dormant.len() - DORMANT_CAP;
+            let excess: Vec<ChunkCoord> = self.dormant.keys().take(n_excess).copied().collect();
+            for coord in excess {
+                if let Some((ids, mesh_handles)) = self.dormant.remove(&coord) {
+                    for id in ids        { level.despawn_entity(id); }
+                    for mh in mesh_handles { assets.remove(mh); }
+                }
+            }
+        }
+
+        // ── Fast-path: reactivate dormant chunks back in range ────────────────
+        // Skips mesh rebuild and GPU upload entirely.  Only terrain collision
+        // solids are recomputed (cheap: pure noise, no GPU allocations).
+        // `sync_entity_objects` will call `enable_object` — zero GPU cost.
+        let reactivate: Vec<ChunkCoord> = desired.iter()
+            .filter(|c| self.dormant.contains_key(c))
+            .copied()
+            .collect();
+        for coord in reactivate {
+            if let Some((ids, mesh_handles)) = self.dormant.remove(&coord) {
+                // Rebuild terrain solids (structures are regenerated next cold load).
+                let mut solid = HashMap::new();
+                regenerate_chunk_terrain(&mut solid, coord);
+                self.solids.insert(coord, solid);
+
+                // Re-create the partition chunk, wire in the entity IDs, activate.
+                // `get_or_create` is idempotent: if stratum.tick already created an
+                // empty entry for this coord this frame, we extend it in-place.
+                {
+                    let chunk = level.partition_mut().get_or_create(coord);
+                    chunk.activate();
+                    for &eid in &ids {
+                        chunk.add_entity(eid);
+                    }
+                }
+
+                self.loaded.insert(coord, (ids, mesh_handles));
+            }
+        }
+
+        // ── Request new chunks sorted by distance ─────────────────────────────
+        // Skip loaded, in-flight, and dormant (dormant was handled above).
         let mut to_request: Vec<ChunkCoord> = desired.into_iter()
-            .filter(|c| !self.loaded.contains_key(c) && !self.in_flight.contains(c))
+            .filter(|c| {
+                !self.loaded.contains_key(c)
+                    && !self.in_flight.contains(c)
+                    && !self.dormant.contains_key(c)
+            })
             .collect();
         let (cx, cz) = (cam.x, cam.z);
         to_request.sort_unstable_by(|a, b| {
@@ -138,8 +211,9 @@ impl VoxelChunkManager {
                     self.in_flight.remove(&coord);
                     let (submeshes, solid) = build_chunk_mesh(device, data, palette);
                     let cx = coord.x as f32 * CHUNK_SIZE + CHUNK_SIZE * 0.5;
+                    let cy = coord.y as f32 * CHUNK_SIZE + CHUNK_SIZE * 0.5;
                     let cz = coord.z as f32 * CHUNK_SIZE + CHUNK_SIZE * 0.5;
-                    let chunk_centre = Vec3::new(cx, CHUNK_SIZE * 0.5, cz);
+                    let chunk_centre = Vec3::new(cx, cy, cz);
 
                     let mut ids = Vec::new();
                     let mut mesh_handles = Vec::new();
@@ -301,7 +375,7 @@ fn build_chunk_mesh(
     // to the correct world position.  This must match the Transform used when
     // spawning the entity in flush_events.
     let chunk_cx = coord.x as f32 * CHUNK_SIZE + CHUNK_SIZE * 0.5;
-    let chunk_cy = CHUNK_SIZE * 0.5;
+    let chunk_cy = coord.y as f32 * CHUNK_SIZE + CHUNK_SIZE * 0.5;
     let chunk_cz = coord.z as f32 * CHUNK_SIZE + CHUNK_SIZE * 0.5;
 
     let mut verts: HashMap<Block, Vec<PackedVertex>> = HashMap::new();

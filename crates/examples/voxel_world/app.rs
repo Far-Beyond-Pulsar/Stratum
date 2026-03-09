@@ -549,15 +549,6 @@ impl AppState {
 
         self.stratum.tick(dt);
 
-        // Re-activate all manager-loaded chunks
-        {
-            let level = self.stratum.active_level_mut().expect("level");
-            for &coord in self.chunks.loaded.keys() {
-                level.partition_mut().get_or_create(coord).activate();
-            }
-        }
-
-
         let size  = self.window.inner_size();
         let views = self.stratum.build_views(size.width, size.height, self.time);
         if views.is_empty() { return; }

@@ -100,48 +100,97 @@ impl HelioIntegration {
     // ── Object registry sync ──────────────────────────────────────────────────────
 
     /// Synchronise the Helio persistent proxy registry against the current
-    /// level entity store.
+    /// level's **active** chunk set.
     ///
-    /// * New mesh entities → `add_object` (allocates a GPU instance buffer).
-    /// * Gone entities    → `remove_object` (drops the GPU buffer).
-    /// * Existing entities → `update_transform` (zero-cost when unchanged).
-    pub fn sync_entity_objects(&mut self, store: &EntityStore) {
-        // ── Remove objects for entities that are no longer in the store ───────
-        let gone: Vec<EntityId> = self.entity_objects.keys()
-            .filter(|&&id| {
-                store.get(id).map_or(true, |c| c.mesh.is_none())
-            })
+    /// Only entities whose chunk is in `ChunkState::Active` are registered;
+    /// entities in deactivated / unloaded chunks are removed from the GPU
+    /// proxy registry even though they remain in the `EntityStore`.  This
+    /// mirrors exactly what `build_render_views` does for geometry candidates.
+    ///
+    /// ## Strategy
+    ///
+    /// Objects are registered with Helio **once** and kept resident in GPU
+    /// memory for their entire lifetime — regardless of chunk streaming state.
+    /// Chunk activation/deactivation only flips the proxy's `enabled` flag
+    /// via `enable_object` / `disable_object`, which costs a single `bool`
+    /// write with zero GPU allocation.  This is the key advantage of the
+    /// persistent proxy API: streaming causes no GPU buffer churn.
+    ///
+    /// Only genuine despawns trigger `remove_object`.
+    ///
+    /// * First seen (any state)  → `add_object` (disabled if chunk inactive).
+    /// * Chunk activates         → `enable_object`.
+    /// * Chunk deactivates       → `disable_object`.
+    /// * Entity despawned        → `remove_object`.
+    /// * Transform changed       → `update_transform` (zero-cost when unchanged).
+    pub fn sync_entity_objects(&mut self, level: &Level) {
+        let store = level.entities();
+
+        // Build the currently-active set once — O(active entities).
+        let active_ids: std::collections::HashSet<EntityId> =
+            level.partition().active_entities().into_iter().collect();
+
+        // ── Remove proxies for truly despawned entities ───────────────────────
+        // Triggered only when the entity is gone from the store or lost its mesh.
+        // Chunk deactivation does NOT remove — it only disables.
+        let despawned: Vec<EntityId> = self.entity_objects.keys()
+            .filter(|&&id| store.get(id).map_or(true, |c| c.mesh.is_none()))
             .copied()
             .collect();
-        for id in gone {
+        for id in despawned {
             if let Some(obj_id) = self.entity_objects.remove(&id) {
                 self.renderer.remove_object(obj_id);
             }
         }
 
-        // ── Add or update objects for all mesh-bearing entities ───────────
+        // ── Register any not-yet-seen mesh entity (active or inactive) ────────
         for (entity_id, components) in store.iter() {
             let Some(mesh_handle) = components.mesh else { continue };
+            if self.entity_objects.contains_key(&entity_id) { continue }
 
-            let transform = components.transform.as_ref()
-                .map(|t| glam::Mat4::from_scale_rotation_translation(t.scale, t.rotation, t.position))
-                .unwrap_or(glam::Mat4::IDENTITY);
-
-            if let Some(&obj_id) = self.entity_objects.get(&entity_id) {
-                // Already registered — just sync the transform.
-                self.renderer.update_transform(obj_id, transform);
+            if let Some(gpu_mesh) = self.assets.get(mesh_handle) {
+                let material = components.material
+                    .and_then(|mh| self.assets.get_material(mh));
+                let transform = components.transform.as_ref()
+                    .map(|t| glam::Mat4::from_scale_rotation_translation(t.scale, t.rotation, t.position))
+                    .unwrap_or(glam::Mat4::IDENTITY);
+                let obj_id = self.renderer.add_object(gpu_mesh, material, transform);
+                // Supply a bounding sphere so the renderer can frustum-cull this object.
+                if components.bounding_radius > 0.0 {
+                    self.renderer.set_object_bounds(obj_id, components.bounding_radius);
+                }
+                // Register disabled if the entity's chunk isn't active yet.
+                if !active_ids.contains(&entity_id) {
+                    self.renderer.disable_object(obj_id);
+                }
+                self.entity_objects.insert(entity_id, obj_id);
             } else {
-                // New entity: register a persistent proxy.
-                if let Some(gpu_mesh) = self.assets.get(mesh_handle) {
-                    let material = components.material
-                        .and_then(|mh| self.assets.get_material(mh));
-                    let obj_id = self.renderer.add_object(gpu_mesh, material, transform);
-                    self.entity_objects.insert(entity_id, obj_id);
-                } else {
-                    log::warn!(
-                        "Entity {:?} references unregistered MeshHandle({:?}) — skipped",
-                        entity_id, mesh_handle
-                    );
+                log::warn!(
+                    "Entity {:?} references unregistered MeshHandle({:?}) — skipped",
+                    entity_id, mesh_handle
+                );
+            }
+        }
+
+        // ── Enable / disable proxies to match current chunk activation ────────
+        // Also update transforms for all enabled (active) objects.
+        for (entity_id, &obj_id) in &self.entity_objects {
+            let is_active = active_ids.contains(entity_id);
+            let currently_enabled = self.renderer.is_object_enabled(obj_id);
+
+            if is_active && !currently_enabled {
+                self.renderer.enable_object(obj_id);
+            } else if !is_active && currently_enabled {
+                self.renderer.disable_object(obj_id);
+            }
+
+            // Update transform for active objects only (no-op when matrix unchanged).
+            if is_active {
+                if let Some(components) = store.get(*entity_id) {
+                    let transform = components.transform.as_ref()
+                        .map(|t| glam::Mat4::from_scale_rotation_translation(t.scale, t.rotation, t.position))
+                        .unwrap_or(glam::Mat4::IDENTITY);
+                    self.renderer.update_transform(obj_id, transform);
                 }
             }
         }
@@ -245,7 +294,8 @@ impl HelioIntegration {
         let store = level.entities();
 
         // Sync persistent mesh objects once per frame (add / remove / update).
-        self.sync_entity_objects(store);
+        // Passes the full Level so chunk activation state is respected.
+        self.sync_entity_objects(level);
 
         for view in views {
             // ── Build per-frame environment (lights, sky, billboards) ─────────

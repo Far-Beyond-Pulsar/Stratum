@@ -8,8 +8,13 @@ use crate::noise::{smooth_noise, hash};
 
 pub const CHUNK_SIZE: f32       = 16.0;
 pub const VOXELS_PER_CHUNK: i32 = 16;
-pub const ACTIVATION_RADIUS: f32 = CHUNK_SIZE * 8.0;
 pub const LOAD_RADIUS: i32      = 16;
+/// Partition activation radius — set large enough that `stratum.tick()`'s
+/// automatic sphere-activation covers all corners of the LOAD_RADIUS square
+/// (diagonal = CHUNK_SIZE * LOAD_RADIUS * sqrt(2) ≈ 362 for LOAD_RADIUS=16).
+/// The voxel chunk manager drives actual visibility via the dormant-cache
+/// enable/disable path; this radius just prevents stratum from fighting us.
+pub const ACTIVATION_RADIUS: f32 = CHUNK_SIZE * (LOAD_RADIUS as f32 * 1.5);
 pub const MAX_Y_CHUNKS: i32     = 3;
 
 pub const BASE_HEIGHT: i32      = 4;
