@@ -134,7 +134,7 @@ impl ApplicationHandler for App {
         let window = Arc::new(
             event_loop.create_window(
                 Window::default_attributes()
-                    .with_title("Stratum — Multi-Biome Voxel World")
+                    .with_title("Stratum — Voxel World  |  WASD fly  |  1-0: toggle passes  |  P: probes  |  Tab: mode")
                     .with_inner_size(winit::dpi::LogicalSize::new(1280u32, 720u32)),
             ).expect("window"),
         );
@@ -322,12 +322,47 @@ impl ApplicationHandler for App {
                 log::info!("Mode → {:?}", state.stratum.mode());
             }
 
+            // ── Pass toggle keys (1-9, 0) ─────────────────────────────────
             WindowEvent::KeyboardInput { event: KeyEvent {
                 state: ElementState::Pressed,
-                physical_key: PhysicalKey::Code(KeyCode::Digit3), ..
+                physical_key: PhysicalKey::Code(code @ (KeyCode::Digit1 | KeyCode::Digit2 | KeyCode::Digit3 | KeyCode::Digit4 | KeyCode::Digit5 | KeyCode::Digit6 | KeyCode::Digit7 | KeyCode::Digit8 | KeyCode::Digit9 | KeyCode::Digit0)),
+                ..
+            }, .. } => {
+                let pass_name = match code {
+                    KeyCode::Digit1 => "depth_prepass",
+                    KeyCode::Digit2 => "gbuffer",
+                    KeyCode::Digit3 => "deferred_lighting",
+                    KeyCode::Digit4 => "shadow",
+                    KeyCode::Digit5 => "geometry",
+                    KeyCode::Digit6 => "transparent",
+                    KeyCode::Digit7 => "sky",
+                    KeyCode::Digit8 => "radiance_cascades",
+                    KeyCode::Digit9 => "billboards",
+                    KeyCode::Digit0 => "ssao",
+                    _ => unreachable!(),
+                };
+                let enabled = state.integration.renderer_mut().toggle_pass(pass_name);
+                eprintln!("[Toggle] {} → {}", pass_name, if enabled { "ON" } else { "OFF" });
+            }
+
+            // ── Probe visualization (P) ───────────────────────────────────
+            WindowEvent::KeyboardInput { event: KeyEvent {
+                state: ElementState::Pressed,
+                physical_key: PhysicalKey::Code(KeyCode::KeyP), ..
             }, .. } => {
                 state.probe_vis = !state.probe_vis;
                 log::trace!("RC Probe Visualization → {}", if state.probe_vis { "ON" } else { "OFF" });
+            }
+
+            // ── Live portal (L) ───────────────────────────────────────────
+            WindowEvent::KeyboardInput { event: KeyEvent {
+                state: ElementState::Pressed,
+                physical_key: PhysicalKey::Code(KeyCode::KeyL), ..
+            }, .. } => {
+                match state.integration.renderer_mut().start_live_portal_default() {
+                    Ok(url) => log::info!("Live portal: {url}"),
+                    Err(e)  => log::warn!("Portal error: {e}"),
+                }
             }
 
             WindowEvent::KeyboardInput { event: KeyEvent {

@@ -11,6 +11,11 @@
 //!
 //! ## Controls
 //! WASD fly | Space/Shift up/down | Mouse drag look (click to grab) | Tab mode | Esc exit
+//!
+//! ## Pass toggles (number keys)
+//! 1 depth_prepass | 2 gbuffer | 3 deferred_lighting | 4 shadow | 5 geometry
+//! 6 transparent | 7 sky | 8 radiance_cascades | 9 billboards | 0 ssao
+//! P probes | R RC bounds | L portal
 
 mod blocks;
 mod noise;
