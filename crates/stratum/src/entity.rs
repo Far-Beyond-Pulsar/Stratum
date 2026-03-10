@@ -114,7 +114,7 @@ impl LightData {
 /// ambient irradiance.  Position is irrelevant — the skylight is scene-global.
 ///
 /// Mirrors `helio_render_v2::scene::Skylight`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SkylightData {
     /// Multiplier applied to the computed sky ambient colour.
     pub intensity:  f32,
@@ -143,7 +143,7 @@ impl SkylightData {
 ///
 /// Mirrors `helio_render_v2::scene::SkyAtmosphere` (minus clouds, which are
 /// not yet exposed through Stratum).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SkyAtmosphereData {
     /// Per-wavelength Rayleigh scattering coefficients (R/G/B).
     pub rayleigh_scatter: [f32; 3],

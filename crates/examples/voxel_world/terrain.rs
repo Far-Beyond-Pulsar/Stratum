@@ -6,9 +6,9 @@ use crate::noise::{smooth_noise, hash};
 
 // ── World constants ─────────────────────────────────────────────────────────
 
-pub const CHUNK_SIZE: f32       = 16.0;
-pub const VOXELS_PER_CHUNK: i32 = 16;
-pub const LOAD_RADIUS: i32      = 16;
+pub const CHUNK_SIZE: f32       = 32.0;
+pub const VOXELS_PER_CHUNK: i32 = 32;
+pub const LOAD_RADIUS: i32      = 8;
 /// Partition activation radius — set large enough that `stratum.tick()`'s
 /// automatic sphere-activation covers all corners of the LOAD_RADIUS square
 /// (diagonal = CHUNK_SIZE * LOAD_RADIUS * sqrt(2) ≈ 362 for LOAD_RADIUS=16).

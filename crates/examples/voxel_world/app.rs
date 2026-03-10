@@ -103,7 +103,6 @@ pub struct AppState {
     stratum:        Stratum,
     integration:    HelioIntegration,
     main_cam_id:    CameraId,
-    sky_entity_id:  EntityId,
     chunks:         VoxelChunkManager,
     streamer:       LevelStreamer,
     palette:        MaterialPalette,
@@ -228,15 +227,15 @@ impl ApplicationHandler for App {
         }
 
         // Skylight — atmospheric sky + sky-driven ambient
-        let sky_entity_id = {
+        {
             let level = stratum.level_mut(level_id).unwrap();
             level.spawn_entity(
                 Components::new()
                     .with_transform(Transform::default())
                     .with_sky_atmosphere(SkyAtmosphereData::new())
                     .with_skylight(SkylightData::new().with_intensity(0.8)),
-            )
-        };
+            );
+        }
 
         // Camera
         let main_cam_id = stratum.register_camera(StratumCamera {
@@ -260,7 +259,7 @@ impl ApplicationHandler for App {
 
         self.state = Some(AppState {
             window, surface, device, queue, surface_format: fmt,
-            stratum, integration, main_cam_id, sky_entity_id,
+            stratum, integration, main_cam_id,
             chunks, streamer, palette, player,
             last_frame:     std::time::Instant::now(),
             keys:           HashSet::new(),
@@ -561,16 +560,6 @@ impl AppState {
             .get_mut(self.main_cam_id)
             .map(|c| c.position)
             .unwrap_or(Vec3::ZERO);
-
-        // Update sky entity position to camera (camera-relative, always visible)
-        {
-            let level = self.stratum.active_level_mut().expect("level");
-            if let Some(sky) = level.entities_mut().get_mut(self.sky_entity_id) {
-                if let Some(transform) = &mut sky.transform {
-                    transform.position = cam_pos;
-                }
-            }
-        }
 
         // Drain stream events → pending queue → flush uploads
         let new_events: Vec<_> = self.streamer.poll_loaded().into_iter().collect();

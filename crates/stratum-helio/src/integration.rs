@@ -2,15 +2,18 @@
 //!
 //! `HelioIntegration` wraps a Helio `Renderer` and an `AssetRegistry`.
 //! Each frame, the host calls `submit_frame()` with the `Vec<RenderView>`
-//! produced by `Stratum::build_views()`. For each view the integration:
+//! produced by `Stratum::build_views()`. The integration:
 //!
-//! 1. Syncs the persistent object registry: adds new entities via `add_object`,
+//! 1. Syncs the persistent mesh proxy registry: adds new entities via `add_object`,
 //!    removes gone entities via `remove_object`, updates transforms via
 //!    `update_transform`.
-//! 2. Builds a per-frame `SceneEnv` (lights, sky, billboards) from visible
-//!    entities.
-//! 3. Builds a Helio `Camera` from the view matrices.
-//! 4. Calls `renderer.set_scene_env()` + `renderer.render()`.
+//! 2. Syncs the persistent light registry: adds new light entities via `add_light`,
+//!    removes gone entities via `remove_light`, updates moved/changed lights via
+//!    `update_light`. Zero GPU cost when lights are static.
+//! 3. Syncs the persistent billboard registry for entity-spawned billboards.
+//! 4. Sets sky atmosphere and skylight only when they change (dirty-checked).
+//! 5. Builds a Helio `Camera` from each view matrix.
+//! 6. Calls `renderer.render()` per view.
 //!
 //! ## Render target resolution
 //!
@@ -26,12 +29,18 @@ use std::collections::HashMap;
 use glam::{Quat, Vec3};
 use stratum::{ChunkState, EntityStore, Level, LightData, RenderTargetHandle, RenderView, WorldPartition};
 use stratum::entity::EntityId;
+use stratum::{SkyAtmosphereData, SkylightData};
 use helio_render_v2::{ObjectId, Renderer};
-
+use helio_render_v2::scene::{LightId, BillboardId};
 use helio_render_v2::features::BillboardInstance;
 
 use crate::asset_registry::AssetRegistry;
-use crate::bridge::{render_view_to_camera, render_view_to_scene_env};
+use crate::bridge::{
+    render_view_to_camera,
+    stratum_light_to_scene_light,
+    stratum_sky_atmosphere_to_helio,
+    stratum_skylight_to_helio,
+};
 
 /// Owns the Helio renderer and the mesh asset registry, and drives render
 /// submission for each frame.
@@ -41,17 +50,36 @@ pub struct HelioIntegration {
     /// Persistent per-entity Helio object IDs. Populated by `sync_entity_objects`;
     /// entries survive across frames for as long as the entity exists in the level.
     entity_objects:   HashMap<EntityId, ObjectId>,
+    /// Persistent per-entity light IDs. Added/removed/updated by `sync_lights_and_sky`.
+    light_objects:    HashMap<EntityId, LightId>,
+    /// Persistent per-entity billboard IDs (entity-spawned only).
+    billboard_objects: HashMap<EntityId, BillboardId>,
+    /// Persistent billboard IDs for externally-injected extra billboards
+    /// (e.g., RC probe grid visualization). Managed by `set_extra_billboards`.
+    extra_billboard_ids: Vec<BillboardId>,
     /// Named offscreen render targets. Populated by the host when
     /// `RenderTargetHandle::OffscreenTexture` cameras are in use.
     offscreen_views:  HashMap<String, wgpu::TextureView>,
-    /// Extra billboards injected by the host (e.g. probe visualisation).
-    /// Merged into every scene in `submit_frame`.
-    extra_billboards: Vec<BillboardInstance>,
+    /// Last sky atmosphere uploaded — used to skip redundant `set_sky_atmosphere`
+    /// calls (which re-render the expensive sky LUT).
+    cached_sky_atm:   Option<SkyAtmosphereData>,
+    /// Last skylight uploaded — used to skip redundant `set_skylight` calls.
+    cached_skylight:  Option<SkylightData>,
 }
 
 impl HelioIntegration {
     pub fn new(renderer: Renderer, assets: AssetRegistry) -> Self {
-        Self { renderer, assets, entity_objects: HashMap::new(), offscreen_views: HashMap::new(), extra_billboards: Vec::new() }
+        Self {
+            renderer,
+            assets,
+            entity_objects:       HashMap::new(),
+            light_objects:        HashMap::new(),
+            billboard_objects:    HashMap::new(),
+            extra_billboard_ids:  Vec::new(),
+            offscreen_views:      HashMap::new(),
+            cached_sky_atm:       None,
+            cached_skylight:      None,
+        }
     }
 
     // ── Accessors ─────────────────────────────────────────────────────────────
@@ -87,15 +115,40 @@ impl HelioIntegration {
 
     // ── Extra billboards ──────────────────────────────────────────────────────
 
-    /// Set extra billboards that will be merged into every scene during
-    /// `submit_frame`. Useful for debug overlays like RC probe grids.
+    /// Set extra billboards that will be rendered alongside entity-spawned
+    /// billboards. Useful for debug overlays like RC probe grids.
+    ///
+    /// Uses the persistent `add_billboard` / `remove_billboard` API so there
+    /// is no per-frame Vec allocation. On subsequent calls with the same
+    /// count, billboard positions are updated in-place (O(N) but no alloc).
     pub fn set_extra_billboards(&mut self, billboards: Vec<BillboardInstance>) {
-        self.extra_billboards = billboards;
+        let new_count = billboards.len();
+        let old_count = self.extra_billboard_ids.len();
+
+        if new_count < old_count {
+            // Remove excess.
+            for id in self.extra_billboard_ids.drain(new_count..) {
+                self.renderer.remove_billboard(id);
+            }
+        } else if new_count > old_count {
+            // Add new entries.
+            for instance in &billboards[old_count..] {
+                let id = self.renderer.add_billboard(instance.clone());
+                self.extra_billboard_ids.push(id);
+            }
+        }
+
+        // Update positions/colors for the common prefix.
+        for (id, instance) in self.extra_billboard_ids.iter().zip(billboards.iter()) {
+            self.renderer.update_billboard(*id, instance.clone());
+        }
     }
 
-    /// Clear all extra billboards.
+    /// Remove all extra billboards previously registered via `set_extra_billboards`.
     pub fn clear_extra_billboards(&mut self) {
-        self.extra_billboards.clear();
+        for id in self.extra_billboard_ids.drain(..) {
+            self.renderer.remove_billboard(id);
+        }
     }
     // ── Object registry sync ──────────────────────────────────────────────────────
 
@@ -195,6 +248,122 @@ impl HelioIntegration {
             }
         }
     }
+    // ── Persistent light + sky sync ───────────────────────────────────────────
+
+    /// Synchronise persistent light and billboard proxies, and update sky /
+    /// atmosphere state, against the current level's entity store.
+    ///
+    /// Called once per frame in `submit_frame`, before any per-view render.
+    ///
+    /// ## Lights
+    ///
+    /// Scans **all** entities (not just visible ones) so shadow-casting lights
+    /// outside the view frustum are still registered. Uses a persistent
+    /// `EntityId → LightId` map:
+    ///
+    /// * New light entity    → `add_light`
+    /// * Light entity gone   → `remove_light`
+    /// * Light entity present → `update_light` (cheap; GPU upload only when data changed)
+    ///
+    /// ## Entity billboards
+    ///
+    /// Same persistent-proxy pattern via `EntityId → BillboardId`.
+    ///
+    /// ## Sky atmosphere / skylight
+    ///
+    /// First entity carrying `sky_atmosphere` / `skylight` components wins.
+    /// `set_sky_atmosphere` / `set_skylight` are called **only when the data
+    /// changes**, avoiding expensive sky-LUT re-renders at steady state.
+    fn sync_lights_and_sky(&mut self, level: &Level) {
+        let store = level.entities();
+
+        // ── Lights ────────────────────────────────────────────────────────────
+
+        // Collect all current light entities from the store (active or not).
+        let mut current_lights: HashMap<EntityId, helio_render_v2::SceneLight> = HashMap::new();
+        for (id, c) in store.iter() {
+            let Some(light) = &c.light else { continue };
+            let Some(tf) = &c.transform else { continue };
+            current_lights.insert(id, stratum_light_to_scene_light(light, tf.position.to_array()));
+        }
+
+        // Remove lights for despawned entities.
+        let removed: Vec<EntityId> = self.light_objects.keys()
+            .filter(|id| !current_lights.contains_key(*id))
+            .copied()
+            .collect();
+        for id in removed {
+            if let Some(lid) = self.light_objects.remove(&id) {
+                self.renderer.remove_light(lid);
+            }
+        }
+
+        // Add new lights; update existing ones.
+        for (id, scene_light) in current_lights {
+            if let Some(&lid) = self.light_objects.get(&id) {
+                self.renderer.update_light(lid, scene_light);
+            } else {
+                let lid = self.renderer.add_light(scene_light);
+                self.light_objects.insert(id, lid);
+            }
+        }
+
+        // ── Entity billboards ─────────────────────────────────────────────────
+
+        let mut current_bb: HashMap<EntityId, BillboardInstance> = HashMap::new();
+        for (id, c) in store.iter() {
+            let Some(bb) = &c.billboard else { continue };
+            let Some(tf) = &c.transform else { continue };
+            current_bb.insert(id,
+                BillboardInstance::new(tf.position.to_array(), bb.size)
+                    .with_color(bb.color)
+                    .with_screen_scale(bb.screen_scale),
+            );
+        }
+
+        let removed_bb: Vec<EntityId> = self.billboard_objects.keys()
+            .filter(|id| !current_bb.contains_key(*id))
+            .copied()
+            .collect();
+        for id in removed_bb {
+            if let Some(bid) = self.billboard_objects.remove(&id) {
+                self.renderer.remove_billboard(bid);
+            }
+        }
+
+        for (id, instance) in current_bb {
+            if let Some(&bid) = self.billboard_objects.get(&id) {
+                self.renderer.update_billboard(bid, instance);
+            } else {
+                let bid = self.renderer.add_billboard(instance);
+                self.billboard_objects.insert(id, bid);
+            }
+        }
+
+        // ── Sky atmosphere / skylight ─────────────────────────────────────────
+        // Scan all entities; first entity with each component wins.
+
+        let mut new_sky_atm: Option<&SkyAtmosphereData> = None;
+        let mut new_skylight: Option<&SkylightData> = None;
+        for (_id, c) in store.iter() {
+            if new_sky_atm.is_none() { new_sky_atm = c.sky_atmosphere.as_ref(); }
+            if new_skylight.is_none() { new_skylight = c.skylight.as_ref(); }
+            if new_sky_atm.is_some() && new_skylight.is_some() { break; }
+        }
+
+        // Upload sky atmosphere only when it actually changed (avoids re-rendering
+        // the expensive sky LUT every frame).
+        if new_sky_atm != self.cached_sky_atm.as_ref() {
+            self.cached_sky_atm = new_sky_atm.cloned();
+            self.renderer.set_sky_atmosphere(new_sky_atm.map(stratum_sky_atmosphere_to_helio));
+        }
+
+        if new_skylight != self.cached_skylight.as_ref() {
+            self.cached_skylight = new_skylight.cloned();
+            self.renderer.set_skylight(new_skylight.map(stratum_skylight_to_helio));
+        }
+    }
+
     // ── Lifecycle ─────────────────────────────────────────────────────────────
 
     /// Notify the renderer that the output surface was resized.
@@ -291,21 +460,13 @@ impl HelioIntegration {
         primary_surface: &wgpu::TextureView,
         delta_time:     f32,
     ) -> helio_render_v2::Result<()> {
-        let store = level.entities();
-
-        // Sync persistent mesh objects once per frame (add / remove / update).
-        // Passes the full Level so chunk activation state is respected.
+        // Sync all persistent proxies once per frame (meshes, lights, sky).
+        // Zero GPU cost at steady state — only dirty slots are uploaded.
         self.sync_entity_objects(level);
+        self.sync_lights_and_sky(level);
 
         for view in views {
-            // ── Build per-frame environment (lights, sky, billboards) ─────────
-            let mut env = render_view_to_scene_env(view, store);
-            let camera  = render_view_to_camera(view);
-
-            // Merge extra billboards (probe vis, etc.) into the env.
-            if !self.extra_billboards.is_empty() {
-                env.billboards.extend(self.extra_billboards.iter().cloned());
-            }
+            let camera = render_view_to_camera(view);
 
             // Resolve offscreen target name before borrowing renderer mutably.
             let offscreen_name: Option<String> = match &view.render_target {
@@ -316,9 +477,6 @@ impl HelioIntegration {
                 }
                 _ => None,
             };
-
-            // ── Submit ────────────────────────────────────────────────────────
-            self.renderer.set_scene_env(env);
 
             if let Some(ref name) = offscreen_name {
                 if let Some(offscreen) = self.offscreen_views.get(name.as_str()) {
