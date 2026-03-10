@@ -53,7 +53,7 @@ use winit::{
 };
 
 use helio_render_v2::{
-    GpuMesh, Renderer, RendererConfig,
+    Renderer, RendererConfig,
     features::{
         FeatureRegistry, LightingFeature, BloomFeature,
         ShadowsFeature, BillboardsFeature,
@@ -497,15 +497,10 @@ impl ApplicationHandler for App {
             )
             .build();
 
-        let renderer = Renderer::new(
+        let mut renderer = Renderer::new(
             device.clone(),
             queue.clone(),
-            RendererConfig {
-                width:          size.width,
-                height:         size.height,
-                surface_format,
-                features:       feature_registry,
-            }
+            RendererConfig::new(size.width, size.height, surface_format, feature_registry),
         )
         .expect("Helio renderer");
 
@@ -513,32 +508,32 @@ impl ApplicationHandler for App {
         let mut assets = AssetRegistry::new();
 
         // Ground — a single large plane covering the whole demo world
-        let h_ground = assets.add(GpuMesh::plane(&device, [45.0, 0.0, 45.0], 47.5));
+        let h_ground = assets.add(renderer.create_mesh_plane([45.0, 0.0, 45.0], 47.5));
 
         // Zone A — City: tall cube towers (chunk 0,0,0 — world x0..30, z0..30)
-        let h_a_tower1 = assets.add(GpuMesh::cube(&device, [ 8.0,  4.0,  8.0], 4.0));
-        let h_a_tower2 = assets.add(GpuMesh::cube(&device, [20.0,  3.0, 12.0], 3.0));
-        let h_a_tower3 = assets.add(GpuMesh::cube(&device, [12.0,  2.0, 22.0], 2.0));
-        let h_a_tower4 = assets.add(GpuMesh::cube(&device, [23.0,  5.5,  7.0], 5.5));
+        let h_a_tower1 = assets.add(renderer.create_mesh_cube([ 8.0,  4.0,  8.0], 4.0));
+        let h_a_tower2 = assets.add(renderer.create_mesh_cube([20.0,  3.0, 12.0], 3.0));
+        let h_a_tower3 = assets.add(renderer.create_mesh_cube([12.0,  2.0, 22.0], 2.0));
+        let h_a_tower4 = assets.add(renderer.create_mesh_cube([23.0,  5.5,  7.0], 5.5));
 
         // Zone B — Factory: large industrial boxes (chunk 2,0,0 — world x60..90, z0..30)
-        let h_b_box1   = assets.add(GpuMesh::cube(&device, [68.0,  4.0, 12.0], 4.0));
-        let h_b_box2   = assets.add(GpuMesh::cube(&device, [82.0,  3.0, 10.0], 3.0));
-        let h_b_box3   = assets.add(GpuMesh::cube(&device, [75.0,  3.0, 22.0], 3.0));
-        let h_b_plat   = assets.add(GpuMesh::plane(&device, [75.0, 0.5, 12.0],  8.0));
+        let h_b_box1   = assets.add(renderer.create_mesh_cube([68.0,  4.0, 12.0], 4.0));
+        let h_b_box2   = assets.add(renderer.create_mesh_cube([82.0,  3.0, 10.0], 3.0));
+        let h_b_box3   = assets.add(renderer.create_mesh_cube([75.0,  3.0, 22.0], 3.0));
+        let h_b_plat   = assets.add(renderer.create_mesh_plane([75.0, 0.5, 12.0],  8.0));
 
         // Zone C — Forest: scattered small "tree" cubes (chunk 0,0,2 — world x0..30, z60..90)
-        let h_c_tree1  = assets.add(GpuMesh::cube(&device, [ 8.0,  2.0, 68.0], 2.0));
-        let h_c_tree2  = assets.add(GpuMesh::cube(&device, [18.0,  1.5, 76.0], 1.5));
-        let h_c_tree3  = assets.add(GpuMesh::cube(&device, [10.0,  1.0, 83.0], 1.0));
-        let h_c_tree4  = assets.add(GpuMesh::cube(&device, [24.0,  3.0, 70.0], 3.0));
-        let h_c_tree5  = assets.add(GpuMesh::cube(&device, [14.0,  0.8, 79.0], 0.8));
+        let h_c_tree1  = assets.add(renderer.create_mesh_cube([ 8.0,  2.0, 68.0], 2.0));
+        let h_c_tree2  = assets.add(renderer.create_mesh_cube([18.0,  1.5, 76.0], 1.5));
+        let h_c_tree3  = assets.add(renderer.create_mesh_cube([10.0,  1.0, 83.0], 1.0));
+        let h_c_tree4  = assets.add(renderer.create_mesh_cube([24.0,  3.0, 70.0], 3.0));
+        let h_c_tree5  = assets.add(renderer.create_mesh_cube([14.0,  0.8, 79.0], 0.8));
 
         // Zone D — Void: monolith + scattered rocks (chunk 2,0,2 — world x60..90, z60..90)
-        let h_d_mono   = assets.add(GpuMesh::cube(&device, [75.0,  6.0, 75.0], 6.0));
-        let h_d_rock1  = assets.add(GpuMesh::cube(&device, [63.0,  0.8, 63.0], 0.8));
-        let h_d_rock2  = assets.add(GpuMesh::cube(&device, [84.0,  0.7, 83.0], 0.7));
-        let h_d_rock3  = assets.add(GpuMesh::cube(&device, [70.0,  0.5, 83.0], 0.5));
+        let h_d_mono   = assets.add(renderer.create_mesh_cube([75.0,  6.0, 75.0], 6.0));
+        let h_d_rock1  = assets.add(renderer.create_mesh_cube([63.0,  0.8, 63.0], 0.8));
+        let h_d_rock2  = assets.add(renderer.create_mesh_cube([84.0,  0.7, 83.0], 0.7));
+        let h_d_rock3  = assets.add(renderer.create_mesh_cube([70.0,  0.5, 83.0], 0.5));
 
         let integration = HelioIntegration::new(renderer, assets);
 

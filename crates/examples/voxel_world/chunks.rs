@@ -5,14 +5,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use glam::Vec3;
-use helio_render_v2::{GpuMesh, PackedVertex};
+use helio_render_v2::{GpuMesh, PackedVertex, Renderer};
 
 use stratum::{
     chunk_on_disk, ChunkCoord, Components, EntityId, Level,
     LevelStreamer, MaterialHandle, MeshHandle, StreamEvent, Transform,
     level_fs::format::ChunkFile,
 };
-use stratum_helio::AssetRegistry;
+use stratum_helio::{AssetRegistry, HelioIntegration};
 
 use crate::blocks::Block;
 use crate::materials::MaterialPalette;
@@ -199,17 +199,16 @@ impl VoxelChunkManager {
     /// Process up to `MAX_UPLOADS_PER_FRAME` pending events (GPU mesh uploads).
     pub fn flush_events(
         &mut self,
-        level:   &mut Level,
-        device:  &wgpu::Device,
-        assets:  &mut AssetRegistry,
-        palette: &MaterialPalette,
+        level:       &mut Level,
+        integration: &mut HelioIntegration,
+        palette:     &MaterialPalette,
     ) {
         let take = self.pending_ready.len().min(MAX_UPLOADS_PER_FRAME);
         for event in self.pending_ready.drain(..take).collect::<Vec<_>>() {
             match event {
                 StreamEvent::ChunkReady { coord, data } => {
                     self.in_flight.remove(&coord);
-                    let (submeshes, solid) = build_chunk_mesh(device, data, palette);
+                    let (submeshes, solid) = build_chunk_mesh(integration.renderer_mut(), data, palette);
                     let cx = coord.x as f32 * CHUNK_SIZE + CHUNK_SIZE * 0.5;
                     let cy = coord.y as f32 * CHUNK_SIZE + CHUNK_SIZE * 0.5;
                     let cz = coord.z as f32 * CHUNK_SIZE + CHUNK_SIZE * 0.5;
@@ -219,7 +218,7 @@ impl VoxelChunkManager {
                     let mut mesh_handles = Vec::new();
 
                     for (gpu_mesh, mat) in submeshes {
-                        let mesh_h = assets.add(gpu_mesh);
+                        let mesh_h = integration.assets_mut().add(gpu_mesh);
                         mesh_handles.push(mesh_h);
                         ids.push(level.spawn_entity(
                             Components::new()
@@ -327,9 +326,9 @@ fn regenerate_chunk_terrain(
 // ── Face-culled mesh builder ────────────────────────────────────────────────
 
 fn build_chunk_mesh(
-    device:  &wgpu::Device,
-    chunk:   ChunkFile,
-    palette: &MaterialPalette,
+    renderer: &mut Renderer,
+    chunk:    ChunkFile,
+    palette:  &MaterialPalette,
 ) -> (Vec<(GpuMesh, MaterialHandle)>, HashMap<(i32, i32, i32), Block>) {
     // Collect solid voxels keyed by their integer min-corner.
     let mut solid: HashMap<(i32, i32, i32), Block> = HashMap::new();
@@ -428,7 +427,7 @@ fn build_chunk_mesh(
     for (block, v) in verts {
         if v.is_empty() { continue; }
         let ix = idxs.remove(&block).unwrap_or_default();
-        result.push((GpuMesh::new(device, &v, &ix), palette.handle_for(block)));
+        result.push((renderer.create_mesh(&v, &ix), palette.handle_for(block)));
     }
     (result, solid)
 }

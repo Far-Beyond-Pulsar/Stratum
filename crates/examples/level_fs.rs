@@ -35,7 +35,7 @@ use winit::{
 };
 
 use helio_render_v2::{
-    GpuMesh, Renderer, RendererConfig,
+    Renderer, RendererConfig,
     features::{
         BillboardsFeature, BloomFeature, FeatureRegistry,
         LightingFeature, RadianceCascadesFeature, ShadowsFeature,
@@ -45,7 +45,7 @@ use helio_render_v2::{
 use stratum::{
     chunk_to_components, discover_chunk_coords, save_level,
     BillboardData, CameraId, CameraKind, Components,
-    LevelId, LightData, MaterialHandle, MeshHandle,
+    LevelId, LightData, MaterialHandle,
     Projection, RenderTargetHandle, SimulationMode,
     Stratum, StratumCamera, Transform, Viewport, Level, StreamEvent, LevelStreamer,
 };
@@ -98,34 +98,34 @@ fn load_sprite(path: &str) -> (Vec<u8>, u32, u32) {
 /// Because we write directly into the integration's `AssetRegistry`, every
 /// handle ID stored in JSON is already valid when we stream the chunks back.
 fn build_and_save(
-    device:     &wgpu::Device,
+    renderer:   &mut Renderer,
     assets:     &mut AssetRegistry,
     cube_mat:   MaterialHandle,
 ) -> PathBuf {
     // ── Upload meshes (handle IDs are stable u64s assigned by the registry) ──
-    let h_ground    = assets.add(GpuMesh::plane(device, [32.0,  0.0,  32.0], 36.0));
+    let h_ground    = assets.add(renderer.create_mesh_plane([32.0,  0.0,  32.0], 36.0));
 
     // Chunk (0,0,0)
-    let h_pillar_a  = assets.add(GpuMesh::cube(device, [ 8.0,  3.0,   8.0], 3.0));
-    let h_pillar_b  = assets.add(GpuMesh::cube(device, [20.0,  2.0,  20.0], 2.0));
-    let _h_lantern  = assets.add(GpuMesh::cube(device, [14.0,  5.5,  14.0], 0.3));
+    let h_pillar_a  = assets.add(renderer.create_mesh_cube([ 8.0,  3.0,   8.0], 3.0));
+    let h_pillar_b  = assets.add(renderer.create_mesh_cube([20.0,  2.0,  20.0], 2.0));
+    let _h_lantern  = assets.add(renderer.create_mesh_cube([14.0,  5.5,  14.0], 0.3));
 
     // Chunk (1,0,0)  x ∈ [32, 64)
-    let h_tower     = assets.add(GpuMesh::cube(device, [42.0,  5.0,  10.0], 5.0));
-    let h_crate     = assets.add(GpuMesh::cube(device, [54.0,  1.5,  22.0], 1.5));
-    let _h_blamp    = assets.add(GpuMesh::cube(device, [48.0,  7.0,  16.0], 0.3));
+    let h_tower     = assets.add(renderer.create_mesh_cube([42.0,  5.0,  10.0], 5.0));
+    let h_crate     = assets.add(renderer.create_mesh_cube([54.0,  1.5,  22.0], 1.5));
+    let _h_blamp    = assets.add(renderer.create_mesh_cube([48.0,  7.0,  16.0], 0.3));
 
     // Chunk (0,0,1)  z ∈ [32, 64)
-    let h_arch      = assets.add(GpuMesh::cube(device, [10.0,  2.0,  44.0], 2.0));
-    let h_tree      = assets.add(GpuMesh::cube(device, [22.0,  3.0,  55.0], 3.0));
+    let h_arch      = assets.add(renderer.create_mesh_cube([10.0,  2.0,  44.0], 2.0));
+    let h_tree      = assets.add(renderer.create_mesh_cube([22.0,  3.0,  55.0], 3.0));
 
     // Chunk (-1,0,0) x ∈ [-32, 0)
-    let h_rock      = assets.add(GpuMesh::cube(device, [-14.0, 1.0,  14.0], 1.0));
-    let h_torch     = assets.add(GpuMesh::cube(device, [ -6.0, 4.0,  20.0], 0.5));
+    let h_rock      = assets.add(renderer.create_mesh_cube([-14.0, 1.0,  14.0], 1.0));
+    let h_torch     = assets.add(renderer.create_mesh_cube([ -6.0, 4.0,  20.0], 0.5));
 
     // Chunk (2,0,2)  x ∈ [64,96), z ∈ [64,96)
-    let h_monolith  = assets.add(GpuMesh::cube(device, [74.0,  8.0,  74.0], 8.0));
-    let _h_redlamp  = assets.add(GpuMesh::cube(device, [74.0, 18.0,  74.0], 0.3));
+    let h_monolith  = assets.add(renderer.create_mesh_cube([74.0,  8.0,  74.0], 8.0));
+    let _h_redlamp  = assets.add(renderer.create_mesh_cube([74.0, 18.0,  74.0], 0.3));
 
     // ── Build Level ───────────────────────────────────────────────────────────
     let mut level = Level::new(LevelId::new(1), "example_world", CHUNK_SIZE, ACTIVATION_RADIUS);
@@ -356,26 +356,28 @@ impl ApplicationHandler for App {
             )
             .build();
 
-        let renderer = Renderer::new(
+        let mut renderer = Renderer::new(
             device.clone(), queue.clone(),
-            RendererConfig { width: size.width, height: size.height, surface_format: fmt, features },
+            RendererConfig::new(size.width, size.height, fmt, features),
         ).expect("renderer");
 
-        // ── Integration + cube material ───────────────────────────────────────
-        let mut integration = HelioIntegration::new(renderer, AssetRegistry::new());
-
+        // ── Create material before renderer is moved into HelioIntegration ────
         let (tex, tw, th) = load_sprite("image.png");
-        let gpu_mat = integration.create_material(
+        let gpu_mat = renderer.create_material(
             &Material::new()
                 .with_roughness(0.5)
                 .with_metallic(0.0)
                 .with_base_color_texture(TextureData::new(tex, tw, th)),
         );
-        let cube_mat = integration.assets_mut().add_material(gpu_mat);
 
         // ── Build scene and save to disk ──────────────────────────────────────
-        // Meshes go directly into integration.assets so handle IDs in JSON match.
-        let dir = build_and_save(&device, integration.assets_mut(), cube_mat);
+        // Meshes go directly into assets so handle IDs in JSON match on reload.
+        let mut assets = AssetRegistry::new();
+        let cube_mat = assets.add_material(gpu_mat);
+        let dir = build_and_save(&mut renderer, &mut assets, cube_mat);
+
+        // ── Integration ───────────────────────────────────────────────────────
+        let integration = HelioIntegration::new(renderer, assets);
 
         // ── Stratum world (empty — entities stream in from disk) ──────────────
         let mut stratum = Stratum::new(SimulationMode::Editor);

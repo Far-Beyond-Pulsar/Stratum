@@ -37,7 +37,7 @@ use winit::{
 };
 
 use helio_render_v2::{
-    GpuMesh, Renderer, RendererConfig,
+    Renderer, RendererConfig,
     features::{
         FeatureRegistry, LightingFeature, BloomFeature,
         ShadowsFeature, BillboardsFeature,
@@ -512,25 +512,20 @@ impl ApplicationHandler for App {
             )
             .build();
 
-        let renderer = Renderer::new(
+        let mut renderer = Renderer::new(
             device.clone(),
             queue.clone(),
-            RendererConfig {
-                width:          size.width,
-                height:         size.height,
-                surface_format,
-                features:       feature_registry,
-            },
+            RendererConfig::new(size.width, size.height, surface_format, feature_registry),
         )
         .expect("Failed to create Helio renderer");
 
         // ── Asset registry: register GpuMeshes ───────────────────────────────
         let mut assets = AssetRegistry::new();
 
-        let h_cube1  = assets.add(GpuMesh::cube (&device, [ 0.0, 0.5,  0.0], 0.5));
-        let h_cube2  = assets.add(GpuMesh::cube (&device, [-2.0, 0.4, -1.0], 0.4));
-        let h_cube3  = assets.add(GpuMesh::cube (&device, [ 2.0, 0.3,  0.5], 0.3));
-        let h_ground = assets.add(GpuMesh::plane(&device, [ 0.0, 0.0,  0.0], 5.0));
+        let h_cube1  = assets.add(renderer.create_mesh_cube ([ 0.0, 0.5,  0.0], 0.5));
+        let h_cube2  = assets.add(renderer.create_mesh_cube ([-2.0, 0.4, -1.0], 0.4));
+        let h_cube3  = assets.add(renderer.create_mesh_cube ([ 2.0, 0.3,  0.5], 0.3));
+        let h_ground = assets.add(renderer.create_mesh_plane([ 0.0, 0.0,  0.0], 5.0));
 
         // ── PBR cube material: image.png as base-colour texture ───────────────
         let (cube_tex_rgba, cube_tex_w, cube_tex_h) = load_sprite("image.png");

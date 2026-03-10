@@ -565,9 +565,9 @@ impl AppState {
         let new_events: Vec<_> = self.streamer.poll_loaded().into_iter().collect();
         self.chunks.collect_events(new_events);
         {
-            let level  = self.stratum.active_level_mut().expect("level");
+            let level = self.stratum.active_level_mut().expect("level");
+            self.chunks.flush_events(level, &mut self.integration, &self.palette);
             let assets = self.integration.assets_mut();
-            self.chunks.flush_events(level, &self.device, assets, &self.palette);
             self.chunks.update(cam_pos, level, &self.streamer, assets);
         }
 
