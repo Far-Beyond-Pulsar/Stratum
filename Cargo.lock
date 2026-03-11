@@ -772,8 +772,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ff2abc00be7fca6ebc474524697ae276ad847ad0a6b3faa4bcb027e9a4614ad0"
 dependencies = [
  "cfg-if",
+ "js-sys",
  "libc",
  "wasi",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -911,8 +913,10 @@ version = "0.1.8"
 dependencies = [
  "bitflags 2.11.0",
  "bytemuck",
+ "getrandom 0.2.17",
  "glam",
  "helio-live-portal",
+ "js-sys",
  "log",
  "petgraph",
  "pollster",
@@ -920,6 +924,7 @@ dependencies = [
  "regex",
  "thiserror 1.0.69",
  "walkdir",
+ "wasm-bindgen-futures",
  "wgpu",
 ]
 
