@@ -176,7 +176,7 @@ impl ApplicationHandler for App {
                     .with_light(LightData::Directional {
                         direction: Vec3::new(-0.4, -1.0, -0.3).normalize().to_array(),
                         color:     [1.0, 0.97, 0.88],
-                        intensity: 5.0,
+                        intensity: 25.0,
                     }),
             );
         }
