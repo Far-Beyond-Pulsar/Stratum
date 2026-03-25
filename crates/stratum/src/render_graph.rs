@@ -37,7 +37,6 @@ fn camera_active_in_mode(mode: &SimulationMode, kind: &CameraKind) -> bool {
 /// | `level`         | Active level (entity store + partition)               |
 /// | `window_width`  | Render target width in pixels (for aspect calculation)|
 /// | `window_height` | Render target height in pixels                        |
-/// | `time`          | Elapsed time in seconds (forwarded to shaders)        |
 ///
 /// Returns views sorted by `priority` (ascending, lower = renders first).
 ///
@@ -55,7 +54,6 @@ pub fn build_render_views(
     level:         &Level,
     window_width:  u32,
     window_height: u32,
-    time:          f32,
 ) -> Vec<RenderView> {
     let store = level.entities();
 
@@ -108,9 +106,12 @@ pub fn build_render_views(
         .filter(|(_, cam)| camera_active_in_mode(mode, &cam.kind))
         .map(|(cam_id, cam)| {
             let aspect    = cam.viewport.aspect(window_width, window_height);
-            let view_proj = cam.view_proj(aspect);
+            let view      = cam.view_matrix();
+            let proj      = cam.proj_matrix(aspect);
+            let view_proj = proj * view;
             let frustum   = Frustum::from_view_proj(&view_proj);
             let visible   = visibility_cull(&candidates, store, &frustum);
+            let (near, far) = cam.projection.near_far();
 
             log::trace!(
                 "Camera {:?} → {} visible entities",
@@ -120,9 +121,12 @@ pub fn build_render_views(
 
             RenderView {
                 camera_id:        cam_id,
+                view,
+                proj,
                 view_proj,
                 camera_position:  cam.position,
-                time,
+                near,
+                far,
                 render_target:    cam.render_target.clone(),
                 viewport:         cam.viewport,
                 visible_entities: visible,

@@ -190,7 +190,6 @@ impl Stratum {
         &self,
         window_width:  u32,
         window_height: u32,
-        time:          f32,
     ) -> Vec<RenderView> {
         let Some(level) = self.active_level() else {
             return Vec::new();
@@ -201,7 +200,6 @@ impl Stratum {
             level,
             window_width,
             window_height,
-            time,
         )
     }
 
@@ -334,7 +332,7 @@ mod tests {
     #[test]
     fn no_active_level_build_views_returns_empty() {
         let s = make_stratum(SimulationMode::Game);
-        assert!(s.build_views(1280, 720, 0.0).is_empty());
+        assert!(s.build_views(1280, 720).is_empty());
     }
 
     // ── Camera management ─────────────────────────────────────────────────────
@@ -364,7 +362,7 @@ mod tests {
         populate_level(&mut s, level_id);
         s.register_camera(game_camera());
         s.register_camera(editor_camera());
-        let views = s.build_views(1280, 720, 0.0);
+        let views = s.build_views(1280, 720);
         assert_eq!(views.len(), 1, "only the game camera should render in Game mode");
     }
 
@@ -375,7 +373,7 @@ mod tests {
         populate_level(&mut s, level_id);
         s.register_camera(game_camera());
         s.register_camera(editor_camera());
-        let views = s.build_views(1280, 720, 0.0);
+        let views = s.build_views(1280, 720);
         assert_eq!(views.len(), 1, "only the editor camera should render in Editor mode");
     }
 
@@ -385,7 +383,7 @@ mod tests {
         let level_id = s.create_level("world", 16.0, 48.0);
         populate_level(&mut s, level_id);
         // No cameras registered
-        assert!(s.build_views(1280, 720, 0.0).is_empty());
+        assert!(s.build_views(1280, 720).is_empty());
     }
 
     #[test]
@@ -396,7 +394,7 @@ mod tests {
         let mut cam   = game_camera();
         cam.active    = false;
         s.register_camera(cam);
-        assert!(s.build_views(1280, 720, 0.0).is_empty());
+        assert!(s.build_views(1280, 720).is_empty());
     }
 
     // ── build_views — multi-camera ────────────────────────────────────────────
@@ -414,7 +412,7 @@ mod tests {
         c2.viewport = Viewport::right_half();
         s.register_camera(c1);
         s.register_camera(c2);
-        let views = s.build_views(1280, 720, 0.0);
+        let views = s.build_views(1280, 720);
         assert_eq!(views.len(), 2);
     }
 
@@ -431,7 +429,7 @@ mod tests {
         lo.priority = -1;
         s.register_camera(hi);
         s.register_camera(lo);
-        let views = s.build_views(1280, 720, 0.0);
+        let views = s.build_views(1280, 720);
         assert_eq!(views.len(), 2);
         assert!(views[0].priority <= views[1].priority);
     }
@@ -447,15 +445,15 @@ mod tests {
         s.register_camera(editor_camera());
 
         // Game mode → 1 game camera
-        assert_eq!(s.build_views(1280, 720, 0.0).len(), 1);
+        assert_eq!(s.build_views(1280, 720).len(), 1);
 
         // Switch to Editor → 1 editor camera
         s.set_mode(SimulationMode::Editor);
-        assert_eq!(s.build_views(1280, 720, 0.0).len(), 1);
+        assert_eq!(s.build_views(1280, 720).len(), 1);
 
         // Switch back → game camera again
         s.set_mode(SimulationMode::Game);
-        assert_eq!(s.build_views(1280, 720, 0.0).len(), 1);
+        assert_eq!(s.build_views(1280, 720).len(), 1);
     }
 
     // ── tick / simulation_time ────────────────────────────────────────────────
@@ -525,7 +523,7 @@ mod tests {
 
         // Mirror frame loop: tick first, then build_views
         s.tick(0.016);
-        let views = s.build_views(1280, 720, 0.0);
+        let views = s.build_views(1280, 720);
 
         assert_eq!(views.len(), 1, "one game camera → one view");
         assert!(
@@ -564,7 +562,7 @@ mod tests {
         s.register_camera(cam);
 
         s.tick(0.016);
-        let views = s.build_views(1280, 720, 0.0);
+        let views = s.build_views(1280, 720);
 
         assert_eq!(views.len(), 1);
         assert!(

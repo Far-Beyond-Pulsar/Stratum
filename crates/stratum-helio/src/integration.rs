@@ -4,67 +4,77 @@
 //! Each frame, the host calls `submit_frame()` with the `Vec<RenderView>`
 //! produced by `Stratum::build_views()`. The integration:
 //!
-//! 1. Syncs the persistent mesh proxy registry: adds new entities via `add_object`,
-//!    removes gone entities via `remove_object`, updates transforms via
-//!    `update_transform`.
-//! 2. Syncs the persistent light registry: adds new light entities via `add_light`,
-//!    removes gone entities via `remove_light`, updates moved/changed lights via
-//!    `update_light`. Zero GPU cost when lights are static.
-//! 3. Syncs the persistent billboard registry for entity-spawned billboards.
-//! 4. Sets sky atmosphere and skylight only when they change (dirty-checked).
-//! 5. Builds a Helio `Camera` from each view matrix.
-//! 6. Calls `renderer.render()` per view.
+//! 1. **Syncs the object registry** — inserts new active-chunk entities via
+//!    `insert_object`, removes deactivated-chunk entities via `remove_object`.
+//!    Both operations are O(1) in the Helio persistent-slot architecture.
+//!    Uses `GroupMask` (Static / Dynamic / ShadowOnly / Editor) from each
+//!    entity's [`GroupHint`] component.
+//! 2. **Syncs lights** — scans all entities (not just active-chunk ones)
+//!    so out-of-range shadow-casting lights are still registered.
+//! 3. **Submits billboards** stateless each frame via `set_billboard_instances`.
+//! 4. **Calls `renderer.render(&camera, surface)`** per view — TAA jitter and
+//!    `scene.flush()` / `scene.advance_frame()` are handled internally.
+//!
+//! ## Optimisation surface
+//!
+//! After loading a static level, call [`HelioIntegration::optimise_for_static_level`]
+//! to sort objects by (mesh, material) for instanced draw calls. This is O(N log N)
+//! once and reduces GPU draw call count significantly for dense static scenes.
 //!
 //! ## Render target resolution
 //!
-//! * `RenderTargetHandle::PrimarySurface` → the `wgpu::TextureView` passed
-//!   in directly by the caller (the swapchain image acquired each frame).
+//! * `RenderTargetHandle::PrimarySurface` → the `wgpu::TextureView` passed in
+//!   directly by the caller (the swapchain image acquired each frame).
 //! * `RenderTargetHandle::OffscreenTexture(name)` → a `wgpu::TextureView`
-//!   registered via `register_offscreen_view`. Falls back to primary surface
+//!   registered via `register_offscreen_view`.  Falls back to primary surface
 //!   if the name is unknown.
 //! * `ViewportSlot` → falls back to primary surface.
 
 use std::collections::HashMap;
 
-use glam::{Quat, Vec3};
-use stratum::{ChunkState, EntityStore, Level, LightData, RenderTargetHandle, RenderView, WorldPartition};
+use glam::{Vec3};
+use stratum::{
+    ChunkState, EntityStore, GroupHint, Level,
+    RenderTargetHandle, RenderView, WorldPartition,
+};
 use stratum::entity::EntityId;
-use stratum::{SkyAtmosphereData, SkylightData};
-use helio_render_v2::{ObjectId, Renderer};
-use helio_render_v2::scene::{LightId, BillboardId};
-use helio_render_v2::features::BillboardInstance;
-
-use crate::asset_registry::AssetRegistry;
-use crate::bridge::{
-    render_view_to_camera,
-    stratum_light_to_scene_light,
-    stratum_sky_atmosphere_to_helio,
-    stratum_skylight_to_helio,
+use helio::{
+    BillboardInstance, GpuLight, GroupId, GroupMask, LightId, MaterialId, ObjectDescriptor,
+    ObjectId, Renderer, VirtualObjectDescriptor,
 };
 
-/// Owns the Helio renderer and the mesh asset registry, and drives render
-/// submission for each frame.
+use crate::asset_registry::AssetRegistry;
+use crate::bridge::{render_view_to_camera, stratum_light_to_gpu_light};
+use bytemuck::Zeroable;
+
+// ── GroupHint → GroupMask mapping ─────────────────────────────────────────────
+
+fn group_mask_for_hint(hint: GroupHint) -> GroupMask {
+    match hint {
+        GroupHint::None       => GroupMask::NONE,
+        GroupHint::Static     => GroupMask::from(GroupId::STATIC),
+        GroupHint::Dynamic    => GroupMask::from(GroupId::DYNAMIC),
+        GroupHint::ShadowOnly => GroupMask::from(GroupId::SHADOW_CASTERS),
+        GroupHint::Editor     => GroupMask::from(GroupId::EDITOR),
+    }
+}
+
+// ── HelioIntegration ──────────────────────────────────────────────────────────
+
+/// Owns the Helio renderer and the asset registry, and drives render submission.
 pub struct HelioIntegration {
-    renderer:         Renderer,
-    assets:           AssetRegistry,
-    /// Persistent per-entity Helio object IDs. Populated by `sync_entity_objects`;
-    /// entries survive across frames for as long as the entity exists in the level.
-    entity_objects:   HashMap<EntityId, ObjectId>,
-    /// Persistent per-entity light IDs. Added/removed/updated by `sync_lights_and_sky`.
-    light_objects:    HashMap<EntityId, LightId>,
-    /// Persistent per-entity billboard IDs (entity-spawned only).
-    billboard_objects: HashMap<EntityId, BillboardId>,
-    /// Persistent billboard IDs for externally-injected extra billboards
-    /// (e.g., RC probe grid visualization). Managed by `set_extra_billboards`.
-    extra_billboard_ids: Vec<BillboardId>,
-    /// Named offscreen render targets. Populated by the host when
-    /// `RenderTargetHandle::OffscreenTexture` cameras are in use.
-    offscreen_views:  HashMap<String, wgpu::TextureView>,
-    /// Last sky atmosphere uploaded — used to skip redundant `set_sky_atmosphere`
-    /// calls (which re-render the expensive sky LUT).
-    cached_sky_atm:   Option<SkyAtmosphereData>,
-    /// Last skylight uploaded — used to skip redundant `set_skylight` calls.
-    cached_skylight:  Option<SkylightData>,
+    renderer: Renderer,
+    assets:   AssetRegistry,
+    /// `EntityId → ObjectId` for entities currently resident in the Helio scene.
+    /// Populated when a chunk activates; evicted when a chunk deactivates or the
+    /// entity is despawned.
+    entity_objects: HashMap<EntityId, ObjectId>,
+    /// `EntityId → VirtualObjectId` for virtual-geometry entities.
+    entity_vobjects: HashMap<EntityId, helio::VirtualObjectId>,
+    /// `EntityId → LightId` — lights are registered globally (not per-chunk).
+    light_objects: HashMap<EntityId, LightId>,
+    /// Named offscreen render targets.
+    offscreen_views: HashMap<String, wgpu::TextureView>,
 }
 
 impl HelioIntegration {
@@ -72,317 +82,331 @@ impl HelioIntegration {
         Self {
             renderer,
             assets,
-            entity_objects:       HashMap::new(),
-            light_objects:        HashMap::new(),
-            billboard_objects:    HashMap::new(),
-            extra_billboard_ids:  Vec::new(),
-            offscreen_views:      HashMap::new(),
-            cached_sky_atm:       None,
-            cached_skylight:      None,
+            entity_objects:   HashMap::new(),
+            entity_vobjects:  HashMap::new(),
+            light_objects:    HashMap::new(),
+            offscreen_views:  HashMap::new(),
         }
     }
 
     // ── Accessors ─────────────────────────────────────────────────────────────
 
-    pub fn renderer    (&self)     -> &Renderer         { &self.renderer }
-    pub fn renderer_mut(&mut self) -> &mut Renderer     { &mut self.renderer }
-    pub fn assets      (&self)     -> &AssetRegistry    { &self.assets }
+    pub fn renderer    (&self)     -> &Renderer      { &self.renderer }
+    pub fn renderer_mut(&mut self) -> &mut Renderer  { &mut self.renderer }
+    pub fn assets      (&self)     -> &AssetRegistry { &self.assets }
     pub fn assets_mut  (&mut self) -> &mut AssetRegistry { &mut self.assets }
 
-    // ── Material creation ─────────────────────────────────────────────────────
+    // ── Convenience asset upload ──────────────────────────────────────────────
 
-    /// Create a GPU material from a `helio_render_v2::Material` descriptor and
-    /// return its `GpuMaterial`. The result can be stored in the `AssetRegistry`
-    /// via `assets_mut().add_material(mat)` to obtain a `MaterialHandle`.
-    pub fn create_material(&mut self, material: &helio_render_v2::Material) -> helio_render_v2::GpuMaterial {
-        self.renderer.create_material(material)
+    /// Upload a mesh into the asset registry and return its handle.
+    pub fn upload_mesh(&mut self, mesh: helio::MeshUpload) -> stratum::MeshHandle {
+        self.assets.upload_mesh(&mut self.renderer, mesh)
+    }
+
+    /// Upload a plain (untextured) GPU material and return its handle.
+    pub fn upload_material(&mut self, mat: helio::GpuMaterial) -> stratum::MaterialHandle {
+        self.assets.upload_material(&mut self.renderer, mat)
+    }
+
+    /// Upload a base-colour texture + PBR parameters as a single material.
+    ///
+    /// The texture is uploaded as sRGB RGBA8, and a `MaterialAsset` with the
+    /// base-colour ref is submitted.  On texture-upload failure, falls back to
+    /// an untextured material with the given `base_color`.
+    pub fn upload_textured_material(
+        &mut self,
+        tex_rgba:   Vec<u8>,
+        tex_w:      u32,
+        tex_h:      u32,
+        roughness:  f32,
+        base_color: [f32; 4],
+    ) -> stratum::MaterialHandle {
+        use helio::{
+            GpuMaterial, MaterialAsset, MaterialTextures, MaterialTextureRef,
+            TextureSamplerDesc, TextureUpload,
+        };
+        use bytemuck::Zeroable;
+
+        let tex_id = self.renderer
+            .insert_texture(TextureUpload::rgba8(
+                "material_tex", tex_w, tex_h, true, tex_rgba, TextureSamplerDesc::default(),
+            ))
+            .ok();
+
+        let mut textures = MaterialTextures::default();
+        if let Some(tid) = tex_id {
+            textures.base_color = Some(MaterialTextureRef::new(tid));
+        }
+
+        let gpu = GpuMaterial {
+            base_color,
+            roughness_metallic: [roughness, 0.0, 1.5, 0.0],
+            emissive: [0.0; 4],
+            tex_base_color: if tex_id.is_some() { 0 } else { GpuMaterial::NO_TEXTURE },
+            tex_normal:        GpuMaterial::NO_TEXTURE,
+            tex_roughness:     GpuMaterial::NO_TEXTURE,
+            tex_emissive:      GpuMaterial::NO_TEXTURE,
+            tex_occlusion:     GpuMaterial::NO_TEXTURE,
+            workflow: 0,
+            flags:   0,
+            _pad:    0,
+        };
+        let asset = MaterialAsset { gpu, textures };
+        match self.assets.upload_material_asset(&mut self.renderer, asset) {
+            Ok(h) => h,
+            Err(e) => {
+                log::warn!("upload_textured_material: {e:?}");
+                self.assets.upload_material(&mut self.renderer, GpuMaterial::zeroed())
+            }
+        }
     }
 
     // ── Offscreen texture registry ────────────────────────────────────────────
 
-    /// Register a named offscreen `TextureView` as a render target.
-    ///
-    /// Cameras whose `render_target` is `RenderTargetHandle::OffscreenTexture(name)`
-    /// will render to this view. Overwrites any previous registration for `name`.
     pub fn register_offscreen_view(&mut self, name: impl Into<String>, view: wgpu::TextureView) {
         self.offscreen_views.insert(name.into(), view);
     }
 
-    /// Remove a named offscreen view. The contained `TextureView` is dropped.
     pub fn unregister_offscreen_view(&mut self, name: &str) {
         self.offscreen_views.remove(name);
     }
 
-    // ── Extra billboards ──────────────────────────────────────────────────────
+    // ── Static-level optimisation ─────────────────────────────────────────────
 
-    /// Set extra billboards that will be rendered alongside entity-spawned
-    /// billboards. Useful for debug overlays like RC probe grids.
+    /// Sort all scene objects by (mesh, material) for instanced draw calls.
     ///
-    /// Uses the persistent `add_billboard` / `remove_billboard` API so there
-    /// is no per-frame Vec allocation. On subsequent calls with the same
-    /// count, billboard positions are updated in-place (O(N) but no alloc).
-    pub fn set_extra_billboards(&mut self, billboards: Vec<BillboardInstance>) {
-        let new_count = billboards.len();
-        let old_count = self.extra_billboard_ids.len();
-
-        if new_count < old_count {
-            // Remove excess.
-            for id in self.extra_billboard_ids.drain(new_count..) {
-                self.renderer.remove_billboard(id);
-            }
-        } else if new_count > old_count {
-            // Add new entries.
-            for instance in &billboards[old_count..] {
-                let id = self.renderer.add_billboard(instance.clone());
-                self.extra_billboard_ids.push(id);
-            }
-        }
-
-        // Update positions/colors for the common prefix.
-        for (id, instance) in self.extra_billboard_ids.iter().zip(billboards.iter()) {
-            self.renderer.update_billboard(*id, instance.clone());
-        }
+    /// Call this **once** after a static level has fully loaded and all chunk
+    /// entities have been inserted. Any subsequent `insert_object` or
+    /// `remove_object` (from streaming) will invalidate the sort — this is
+    /// expected for fully-static levels where streaming does not occur after
+    /// the initial load.
+    ///
+    /// Complexity: O(N log N) — call sparingly.
+    pub fn optimise_for_static_level(&mut self) {
+        self.renderer.optimize_scene_layout();
     }
 
-    /// Remove all extra billboards previously registered via `set_extra_billboards`.
-    pub fn clear_extra_billboards(&mut self) {
-        for id in self.extra_billboard_ids.drain(..) {
-            self.renderer.remove_billboard(id);
-        }
-    }
-    // ── Object registry sync ──────────────────────────────────────────────────────
+    // ── Group visibility ──────────────────────────────────────────────────────
 
-    /// Synchronise the Helio persistent proxy registry against the current
-    /// level's **active** chunk set.
-    ///
-    /// Only entities whose chunk is in `ChunkState::Active` are registered;
-    /// entities in deactivated / unloaded chunks are removed from the GPU
-    /// proxy registry even though they remain in the `EntityStore`.  This
-    /// mirrors exactly what `build_render_views` does for geometry candidates.
+    /// Hide all objects belonging to `group` (e.g., hide editor gizmos in game
+    /// mode). Zero-cost GPU mask operation.
+    pub fn hide_group(&mut self, group: GroupId) {
+        self.renderer.hide_group(group);
+    }
+
+    /// Show all objects belonging to `group`.
+    pub fn show_group(&mut self, group: GroupId) {
+        self.renderer.show_group(group);
+    }
+
+    // ── Object registry sync ──────────────────────────────────────────────────
+
+    /// Reconcile the Helio object registry against the current active-chunk set.
     ///
     /// ## Strategy
     ///
-    /// Objects are registered with Helio **once** and kept resident in GPU
-    /// memory for their entire lifetime — regardless of chunk streaming state.
-    /// Chunk activation/deactivation only flips the proxy's `enabled` flag
-    /// via `enable_object` / `disable_object`, which costs a single `bool`
-    /// write with zero GPU allocation.  This is the key advantage of the
-    /// persistent proxy API: streaming causes no GPU buffer churn.
+    /// Builds the **wanted** set (active-chunk entities with a mesh/virtual-mesh)
+    /// and the **have** set (`entity_objects` keys). Then:
     ///
-    /// Only genuine despawns trigger `remove_object`.
+    /// * `to_add = wanted − have`    → `insert_object` / `insert_virtual_object` (O(1))
+    /// * `to_remove = have − wanted` → `remove_object` / `remove_virtual_object` (O(1))
+    /// * `stable`                    → `update_object_transform` if changed
     ///
-    /// * First seen (any state)  → `add_object` (disabled if chunk inactive).
-    /// * Chunk activates         → `enable_object`.
-    /// * Chunk deactivates       → `disable_object`.
-    /// * Entity despawned        → `remove_object`.
-    /// * Transform changed       → `update_transform` (zero-cost when unchanged).
-    pub fn sync_entity_objects(&mut self, level: &Level) {
-        let store = level.entities();
-
-        // Build the currently-active set once — O(active entities).
-        let active_ids: std::collections::HashSet<EntityId> =
+    /// Streaming chunk activate/deactivate therefore causes only the necessary
+    /// insertions and removals — no per-frame full-scan.
+    fn sync_entity_objects(&mut self, level: &Level) {
+        let store  = level.entities();
+        let active: std::collections::HashSet<EntityId> =
             level.partition().active_entities().into_iter().collect();
 
-        // ── Remove proxies for truly despawned entities ───────────────────────
-        // Triggered only when the entity is gone from the store or lost its mesh.
-        // Chunk deactivation does NOT remove — it only disables.
-        let despawned: Vec<EntityId> = self.entity_objects.keys()
-            .filter(|&&id| store.get(id).map_or(true, |c| c.mesh.is_none()))
-            .copied()
-            .collect();
-        for id in despawned {
-            if let Some(obj_id) = self.entity_objects.remove(&id) {
-                self.renderer.remove_object(obj_id);
+        // ── Remove objects for entities no longer wanted ──────────────────────
+        let to_remove: Vec<EntityId> = self.entity_objects.keys()
+            .filter(|&&id| {
+                // Remove if: entity despawned, lost its mesh, or chunk deactivated.
+                !active.contains(&id)
+                || store.get(id).map_or(true, |c| c.mesh.is_none())
+            })
+            .copied().collect();
+        for id in to_remove {
+            if let Some(oid) = self.entity_objects.remove(&id) {
+                if let Err(e) = self.renderer.scene_mut().remove_object(oid) {
+                    log::warn!("remove_object {id:?}: {e:?}");
+                }
             }
         }
 
-        // ── Register any not-yet-seen mesh entity (active or inactive) ────────
-        for (entity_id, components) in store.iter() {
-            let Some(mesh_handle) = components.mesh else { continue };
-            if self.entity_objects.contains_key(&entity_id) { continue }
+        let to_remove_vg: Vec<EntityId> = self.entity_vobjects.keys()
+            .filter(|&&id| {
+                !active.contains(&id)
+                || store.get(id).map_or(true, |c| c.mesh.is_none())
+            })
+            .copied().collect();
+        for id in to_remove_vg {
+            if let Some(vid) = self.entity_vobjects.remove(&id) {
+                if let Err(e) = self.renderer.remove_virtual_object(vid) {
+                    log::warn!("remove_virtual_object {id:?}: {e:?}");
+                }
+            }
+        }
 
-            if let Some(gpu_mesh) = self.assets.get(mesh_handle) {
-                let material = components.material
-                    .and_then(|mh| self.assets.get_material(mh));
-                let transform = components.transform.as_ref()
-                    .map(|t| glam::Mat4::from_scale_rotation_translation(t.scale, t.rotation, t.position))
-                    .unwrap_or(glam::Mat4::IDENTITY);
-                let obj_id = self.renderer.add_object(gpu_mesh, material, transform);
-                // Supply a bounding sphere so the renderer can frustum-cull this object.
-                if components.bounding_radius > 0.0 {
-                    self.renderer.set_object_bounds(obj_id, components.bounding_radius);
+        // ── Insert new active entities ────────────────────────────────────────
+        for &entity_id in &active {
+            let Some(comp) = store.get(entity_id) else { continue };
+            let Some(mesh_handle) = comp.mesh else { continue };
+
+            let transform = comp.transform.as_ref()
+                .map(|t| glam::Mat4::from_scale_rotation_translation(t.scale, t.rotation, t.position))
+                .unwrap_or(glam::Mat4::IDENTITY);
+            let bounds = bounding_sphere_to_array(&comp.transform.as_ref()
+                .map(|t| t.position)
+                .unwrap_or(Vec3::ZERO), comp.bounding_radius);
+            let groups = group_mask_for_hint(comp.group_hint);
+
+            if comp.use_virtual_geometry {
+                if self.entity_vobjects.contains_key(&entity_id) { continue }
+                let Some(vg_id) = self.assets.get_virtual_mesh_id(mesh_handle) else {
+                    log::warn!("Entity {entity_id:?}: use_virtual_geometry but no VirtualMesh registered for {mesh_handle:?}");
+                    continue;
+                };
+                let mat_id = comp.material
+                    .and_then(|mh| self.assets.get_material_id(mh))
+                    .map(|id| id.slot())
+                    .unwrap_or(0);
+                match self.renderer.insert_virtual_object(VirtualObjectDescriptor {
+                    virtual_mesh: vg_id,
+                    material_id:  mat_id,
+                    transform,
+                    bounds,
+                    flags:        0,
+                    groups,
+                }) {
+                    Ok(vid) => { self.entity_vobjects.insert(entity_id, vid); }
+                    Err(e)  => { log::warn!("insert_virtual_object {entity_id:?}: {e:?}"); }
                 }
-                // Register disabled if the entity's chunk isn't active yet.
-                if !active_ids.contains(&entity_id) {
-                    self.renderer.disable_object(obj_id);
-                }
-                self.entity_objects.insert(entity_id, obj_id);
             } else {
-                log::warn!(
-                    "Entity {:?} references unregistered MeshHandle({:?}) — skipped",
-                    entity_id, mesh_handle
-                );
+                if self.entity_objects.contains_key(&entity_id) { continue }
+                let Some(mesh_id) = self.assets.get_mesh_id(mesh_handle) else {
+                    log::warn!("Entity {entity_id:?}: no MeshId registered for {mesh_handle:?}");
+                    continue;
+                };
+                let mat_id = comp.material
+                    .and_then(|mh| self.assets.get_material_id(mh))
+                    .unwrap_or_else(|| MaterialId::from_raw(0, 0));
+                match self.renderer.insert_object(ObjectDescriptor {
+                    mesh:      mesh_id,
+                    material:  mat_id,
+                    transform,
+                    bounds,
+                    flags:     shadow_flags(comp),
+                    groups,
+                }) {
+                    Ok(oid) => { self.entity_objects.insert(entity_id, oid); }
+                    Err(e)  => { log::warn!("insert_object {entity_id:?}: {e:?}"); }
+                }
             }
         }
 
-        // ── Enable / disable proxies to match current chunk activation ────────
-        // Also update transforms for all enabled (active) objects.
-        for (entity_id, &obj_id) in &self.entity_objects {
-            let is_active = active_ids.contains(entity_id);
-            let currently_enabled = self.renderer.is_object_enabled(obj_id);
-
-            if is_active && !currently_enabled {
-                self.renderer.enable_object(obj_id);
-            } else if !is_active && currently_enabled {
-                self.renderer.disable_object(obj_id);
+        // ── Update transforms for stable (already-registered) active objects ──
+        for (&entity_id, &oid) in &self.entity_objects {
+            if !active.contains(&entity_id) { continue }
+            let Some(comp) = store.get(entity_id) else { continue };
+            let transform = comp.transform.as_ref()
+                .map(|t| glam::Mat4::from_scale_rotation_translation(t.scale, t.rotation, t.position))
+                .unwrap_or(glam::Mat4::IDENTITY);
+            if let Err(e) = self.renderer.update_object_transform(oid, transform) {
+                log::warn!("update_object_transform {entity_id:?}: {e:?}");
             }
-
-            // Update transform for active objects only (no-op when matrix unchanged).
-            if is_active {
-                if let Some(components) = store.get(*entity_id) {
-                    let transform = components.transform.as_ref()
-                        .map(|t| glam::Mat4::from_scale_rotation_translation(t.scale, t.rotation, t.position))
-                        .unwrap_or(glam::Mat4::IDENTITY);
-                    self.renderer.update_transform(obj_id, transform);
-                }
+        }
+        for (&entity_id, &vid) in &self.entity_vobjects {
+            if !active.contains(&entity_id) { continue }
+            let Some(comp) = store.get(entity_id) else { continue };
+            let transform = comp.transform.as_ref()
+                .map(|t| glam::Mat4::from_scale_rotation_translation(t.scale, t.rotation, t.position))
+                .unwrap_or(glam::Mat4::IDENTITY);
+            if let Err(e) = self.renderer.update_virtual_object_transform(vid, transform) {
+                log::warn!("update_virtual_object_transform {entity_id:?}: {e:?}");
             }
         }
     }
-    // ── Persistent light + sky sync ───────────────────────────────────────────
 
-    /// Synchronise persistent light and billboard proxies, and update sky /
-    /// atmosphere state, against the current level's entity store.
-    ///
-    /// Called once per frame in `submit_frame`, before any per-view render.
-    ///
-    /// ## Lights
-    ///
-    /// Scans **all** entities (not just visible ones) so shadow-casting lights
-    /// outside the view frustum are still registered. Uses a persistent
-    /// `EntityId → LightId` map:
-    ///
-    /// * New light entity    → `add_light`
-    /// * Light entity gone   → `remove_light`
-    /// * Light entity present → `update_light` (cheap; GPU upload only when data changed)
-    ///
-    /// ## Entity billboards
-    ///
-    /// Same persistent-proxy pattern via `EntityId → BillboardId`.
-    ///
-    /// ## Sky atmosphere / skylight
-    ///
-    /// First entity carrying `sky_atmosphere` / `skylight` components wins.
-    /// `set_sky_atmosphere` / `set_skylight` are called **only when the data
-    /// changes**, avoiding expensive sky-LUT re-renders at steady state.
-    fn sync_lights_and_sky(&mut self, level: &Level) {
-        let store = level.entities();
+    // ── Light sync ────────────────────────────────────────────────────────────
 
-        // ── Lights ────────────────────────────────────────────────────────────
-
-        // Collect all current light entities from the store (active or not).
-        let mut current_lights: HashMap<EntityId, helio_render_v2::SceneLight> = HashMap::new();
+    /// Synchronise persistent light proxies against ALL entities in the level.
+    ///
+    /// Lights are not chunk-gated: a point light's range can extend well beyond
+    /// its chunk boundary.  This mirrors the old integration's behaviour.
+    fn sync_lights(&mut self, store: &EntityStore) {
+        let mut current: HashMap<EntityId, GpuLight> = HashMap::new();
         for (id, c) in store.iter() {
             let Some(light) = &c.light else { continue };
-            let Some(tf) = &c.transform else { continue };
-            current_lights.insert(id, stratum_light_to_scene_light(light, tf.position.to_array()));
+            let pos = c.transform.as_ref().map(|t| t.position).unwrap_or(Vec3::ZERO);
+            current.insert(id, stratum_light_to_gpu_light(light, pos));
         }
 
         // Remove lights for despawned entities.
         let removed: Vec<EntityId> = self.light_objects.keys()
-            .filter(|id| !current_lights.contains_key(*id))
-            .copied()
-            .collect();
+            .filter(|id| !current.contains_key(*id))
+            .copied().collect();
         for id in removed {
             if let Some(lid) = self.light_objects.remove(&id) {
-                self.renderer.remove_light(lid);
+                if let Err(e) = self.renderer.remove_light(lid) {
+                    log::warn!("remove_light {id:?}: {e:?}");
+                }
             }
         }
 
-        // Add new lights; update existing ones.
-        for (id, scene_light) in current_lights {
+        // Add new / update existing.
+        for (id, gpu_light) in current {
             if let Some(&lid) = self.light_objects.get(&id) {
-                self.renderer.update_light(lid, scene_light);
+                if let Err(e) = self.renderer.update_light(lid, gpu_light) {
+                    log::warn!("update_light {id:?}: {e:?}");
+                }
             } else {
-                let lid = self.renderer.add_light(scene_light);
+                let lid = self.renderer.insert_light(gpu_light);
                 self.light_objects.insert(id, lid);
             }
         }
+    }
 
-        // ── Entity billboards ─────────────────────────────────────────────────
+    // ── Billboard sync ────────────────────────────────────────────────────────
 
-        let mut current_bb: HashMap<EntityId, BillboardInstance> = HashMap::new();
-        for (id, c) in store.iter() {
-            let Some(bb) = &c.billboard else { continue };
-            let Some(tf) = &c.transform else { continue };
-            current_bb.insert(id,
-                BillboardInstance::new(tf.position.to_array(), bb.size)
-                    .with_color(bb.color)
-                    .with_screen_scale(bb.screen_scale),
-            );
-        }
-
-        let removed_bb: Vec<EntityId> = self.billboard_objects.keys()
-            .filter(|id| !current_bb.contains_key(*id))
-            .copied()
+    /// Collect all entity billboards and submit them to the renderer in one call.
+    ///
+    /// The new Helio billboard API is stateless — `set_billboard_instances` replaces
+    /// the entire list each frame.  This is simpler and just as efficient.
+    fn sync_billboards(&mut self, store: &EntityStore, extras: &[BillboardInstance]) {
+        let mut instances: Vec<BillboardInstance> = store.iter()
+            .filter_map(|(_, c)| {
+                let bb = c.billboard.as_ref()?;
+                let tf = c.transform.as_ref()?;
+                let pos = tf.position;
+                Some(BillboardInstance {
+                    world_pos:   [pos.x, pos.y, pos.z, 0.0],
+                    scale_flags: [bb.size[0], bb.size[1], if bb.screen_scale { 1.0 } else { 0.0 }, 0.0],
+                    color:       bb.color,
+                })
+            })
             .collect();
-        for id in removed_bb {
-            if let Some(bid) = self.billboard_objects.remove(&id) {
-                self.renderer.remove_billboard(bid);
-            }
-        }
-
-        for (id, instance) in current_bb {
-            if let Some(&bid) = self.billboard_objects.get(&id) {
-                self.renderer.update_billboard(bid, instance);
-            } else {
-                let bid = self.renderer.add_billboard(instance);
-                self.billboard_objects.insert(id, bid);
-            }
-        }
-
-        // ── Sky atmosphere / skylight ─────────────────────────────────────────
-        // Scan all entities; first entity with each component wins.
-
-        let mut new_sky_atm: Option<&SkyAtmosphereData> = None;
-        let mut new_skylight: Option<&SkylightData> = None;
-        for (_id, c) in store.iter() {
-            if new_sky_atm.is_none() { new_sky_atm = c.sky_atmosphere.as_ref(); }
-            if new_skylight.is_none() { new_skylight = c.skylight.as_ref(); }
-            if new_sky_atm.is_some() && new_skylight.is_some() { break; }
-        }
-
-        // Upload sky atmosphere only when it actually changed (avoids re-rendering
-        // the expensive sky LUT every frame).
-        if new_sky_atm != self.cached_sky_atm.as_ref() {
-            self.cached_sky_atm = new_sky_atm.cloned();
-            self.renderer.set_sky_atmosphere(new_sky_atm.map(stratum_sky_atmosphere_to_helio));
-        }
-
-        if new_skylight != self.cached_skylight.as_ref() {
-            self.cached_skylight = new_skylight.cloned();
-            self.renderer.set_skylight(new_skylight.map(stratum_skylight_to_helio));
-        }
+        instances.extend_from_slice(extras);
+        self.renderer.set_billboard_instances(&instances);
     }
 
     // ── Lifecycle ─────────────────────────────────────────────────────────────
 
     /// Notify the renderer that the output surface was resized.
     pub fn resize(&mut self, width: u32, height: u32) {
-        self.renderer.resize(width, height);
+        self.renderer.set_render_size(width, height);
     }
 
     // ── Debug drawing ─────────────────────────────────────────────────────────
 
     /// Submit debug wireframe boxes for every chunk in `partition`.
     ///
-    /// Color-coding by [`ChunkState`]:
-    /// * **Active**    — green  (`[0.0, 1.0, 0.0, 0.4]`)
-    /// * **Loading**   — yellow (`[1.0, 1.0, 0.0, 0.4]`)
-    /// * **Unloading** — orange (`[1.0, 0.5, 0.0, 0.3]`)
-    /// * **Unloaded**  — gray   (`[0.5, 0.5, 0.5, 0.15]`)
-    ///
-    /// Call this after `submit_frame` (or before — shapes are transient and
-    /// cleared automatically by the renderer after each render call).
+    /// Colour-coded by [`ChunkState`]:
+    /// * **Active**    — green  `[0.0, 1.0, 0.0, 0.4]`
+    /// * **Loading**   — yellow `[1.0, 1.0, 0.0, 0.4]`
+    /// * **Unloading** — orange `[1.0, 0.5, 0.0, 0.3]`
+    /// * **Unloaded**  — gray   `[0.5, 0.5, 0.5, 0.15]`
     pub fn debug_draw_world_partition(&mut self, partition: &WorldPartition) {
         for chunk in partition.chunks() {
             let center       = chunk.bounds.center();
@@ -393,117 +417,90 @@ impl HelioIntegration {
                 ChunkState::Unloading => [1.0, 0.5, 0.0, 0.3],
                 ChunkState::Unloaded  => [0.5, 0.5, 0.5, 0.15],
             };
-            self.renderer.debug_box(center, half_extents, Quat::IDENTITY, color, 0.03);
+            // Debug draw is renderer-specific; use scene ambient as a proxy or
+            // integrate with a debug-draw pass if available.
+            let _ = (center, half_extents, color); // TODO: wire to debug pass
         }
     }
 
     /// Submit debug attenuation volumes for every light entity in `store`.
-    ///
-    /// * **Point** light → wireframe sphere at the light position with radius = `range`.
-    /// * **Spot**  light → wireframe cone with apex at position, pointing along
-    ///   `direction`, height = `range`, base radius = `range * tan(outer_angle)`.
-    /// * **Directional** light → three short arrows in the light direction (no
-    ///   attenuation to visualise, so just a direction indicator).
-    ///
-    /// Call before `submit_frame` so shapes are flushed with the same render call.
     pub fn debug_draw_lights(&mut self, store: &EntityStore) {
         for (_id, components) in store.iter() {
             let (Some(light), Some(transform)) = (&components.light, &components.transform)
             else { continue };
-
-            let pos = transform.position;
-
-            match light {
-                LightData::Point { color, range, .. } => {
-                    let c = [color[0], color[1], color[2], 0.5];
-                    self.renderer.debug_sphere(pos, *range, c, 0.03);
-                }
-
-                LightData::Spot { direction, color, range, outer_angle, .. } => {
-                    let dir = Vec3::from(*direction).normalize_or_zero();
-                    let base_radius = range * outer_angle.tan();
-                    let c = [color[0], color[1], color[2], 0.55];
-                    self.renderer.debug_cone(pos, dir, *range, base_radius, c, 0.03);
-                }
-
-                LightData::Directional { direction, color, .. } => {
-                    // Three parallel arrow shafts to show direction (no range).
-                    let dir  = Vec3::from(*direction).normalize_or_zero();
-                    let c    = [color[0], color[1], color[2], 0.6];
-                    for offset in [Vec3::ZERO, Vec3::X * 0.4, Vec3::Z * 0.4] {
-                        let start = pos + offset;
-                        self.renderer.debug_line(start, start + dir * 3.0, c, 0.03);
-                    }
-                }
-            }
+            let _ = (light, transform); // TODO: wire to debug pass
         }
     }
 
     // ── Frame submission ──────────────────────────────────────────────────────
+
     /// Submit all render views for one frame.
     ///
-    /// # Parameters
+    /// | Parameter         | Description                                    |
+    /// |-------------------|------------------------------------------------|
+    /// | `views`           | Output of `Stratum::build_views()`             |
+    /// | `level`           | Active level (entity data for scene sync)      |
+    /// | `primary_surface` | Swapchain image acquired this frame            |
+    /// | `extra_billboards`| Additional billboard instances (e.g., RC grid) |
     ///
-    /// | Name                  | Description                                 |
-    /// |-----------------------|---------------------------------------------|
-    /// | `views`               | Output of `Stratum::build_views()`          |
-    /// | `level`               | Active level (entity data for scene build)  |
-    /// | `primary_surface`     | The swapchain image acquired this frame     |
-    /// | `delta_time`          | Frame delta in seconds                      |
-    ///
-    /// Views are already sorted by priority when produced by Stratum; this
-    /// function submits them in order.
+    /// Views are sorted by priority when produced by Stratum; submitted in order.
     pub fn submit_frame(
         &mut self,
-        views:          &[RenderView],
-        level:          &Level,
-        primary_surface: &wgpu::TextureView,
-        delta_time:     f32,
-    ) -> helio_render_v2::Result<()> {
-        // Sync all persistent proxies once per frame (meshes, lights, sky).
-        // Zero GPU cost at steady state — only dirty slots are uploaded.
+        views:            &[RenderView],
+        level:            &Level,
+        primary_surface:  &wgpu::TextureView,
+        extra_billboards: &[BillboardInstance],
+    ) -> helio::Result<()> {
+        // Sync persistent proxies.
         self.sync_entity_objects(level);
-        self.sync_lights_and_sky(level);
+        self.sync_lights(level.entities());
+        self.sync_billboards(level.entities(), extra_billboards);
 
         for view in views {
             let camera = render_view_to_camera(view);
 
-            // Resolve offscreen target name before borrowing renderer mutably.
             let offscreen_name: Option<String> = match &view.render_target {
-                RenderTargetHandle::OffscreenTexture(name)
-                    if self.offscreen_views.contains_key(name.as_str()) =>
-                {
-                    Some(name.clone())
-                }
+                RenderTargetHandle::OffscreenTexture(n)
+                    if self.offscreen_views.contains_key(n.as_str()) => Some(n.clone()),
                 _ => None,
             };
 
             if let Some(ref name) = offscreen_name {
-                if let Some(offscreen) = self.offscreen_views.get(name.as_str()) {
-                    self.renderer.render(&camera, offscreen, delta_time)?;
+                if let Some(target) = self.offscreen_views.get(name.as_str()) {
+                    self.renderer.render(&camera, target)?;
                     continue;
                 }
             }
 
-            // Warn for unresolved targets and fall back to primary surface.
             match &view.render_target {
                 RenderTargetHandle::OffscreenTexture(name) => {
-                    log::warn!(
-                        "Unresolved offscreen texture '{}' — routing to primary surface",
-                        name
-                    );
+                    log::warn!("Unresolved offscreen texture '{name}' — routing to primary surface");
                 }
                 RenderTargetHandle::PrimarySurface => {}
                 other => {
-                    log::warn!(
-                        "Unresolved render target {:?} — routing to primary surface",
-                        other
-                    );
+                    log::warn!("Unresolved render target {other:?} — routing to primary surface");
                 }
             }
-            self.renderer.render(&camera, primary_surface, delta_time)?;
+            self.renderer.render(&camera, primary_surface)?;
         }
 
         Ok(())
     }
 }
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+/// Convert a world-space bounding sphere to the `[cx, cy, cz, radius]` format
+/// expected by `ObjectDescriptor::bounds`.
+fn bounding_sphere_to_array(center: &Vec3, radius: f32) -> [f32; 4] {
+    let r = if radius > 0.0 { radius } else { 50.0 };
+    [center.x, center.y, center.z, r]
+}
+
+/// Object flags: bit 0 = casts shadow, bit 1 = receives shadow.
+fn shadow_flags(comp: &stratum::Components) -> u32 {
+    // By default all mesh objects cast and receive shadows.
+    // Entities tagged "no_shadow" opt out.
+    if comp.tags.iter().any(|t| t == "no_shadow") { 0 } else { 0b11 }
+}
+

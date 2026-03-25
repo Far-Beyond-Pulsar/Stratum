@@ -1,7 +1,7 @@
 //! PBR material palette — one material per block type with Faithful 64x textures.
 
 use stratum::MaterialHandle;
-use stratum_helio::{HelioIntegration, Material, TextureData};
+use stratum_helio::HelioIntegration;
 
 use crate::blocks::Block;
 
@@ -122,23 +122,12 @@ impl MaterialPalette {
     pub fn new(integration: &mut HelioIntegration) -> Self {
         let m = |int: &mut HelioIntegration, tex_path: &str, roughness: f32| {
             let (tex_rgba, w, h) = load_block_texture(tex_path);
-            let g = int.create_material(
-                &Material::new()
-                    .with_base_color_texture(TextureData::new(tex_rgba, w, h))
-                    .with_roughness(roughness),
-            );
-            int.assets_mut().add_material(g)
+            int.upload_textured_material(tex_rgba, w, h, roughness, [1.0, 1.0, 1.0, 1.0])
         };
         // Tinted material for grayscale textures (grass, leaves)
         let m_tinted = |int: &mut HelioIntegration, tex_path: &str, roughness: f32, tint: [f32; 4]| {
             let (tex_rgba, w, h) = load_block_texture(tex_path);
-            let g = int.create_material(
-                &Material::new()
-                    .with_base_color(tint)
-                    .with_base_color_texture(TextureData::new(tex_rgba, w, h))
-                    .with_roughness(roughness),
-            );
-            int.assets_mut().add_material(g)
+            int.upload_textured_material(tex_rgba, w, h, roughness, tint)
         };
         Self {
             grass:       m_tinted(integration, "grass_block_top.png", 0.50, [0.52, 0.82, 0.35, 1.0]),

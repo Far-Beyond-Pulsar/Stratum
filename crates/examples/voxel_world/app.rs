@@ -13,14 +13,10 @@ use winit::{
     window::{CursorGrabMode, Window, WindowId},
 };
 
-use helio_render_v2::{
-    Renderer, RendererConfig,
-    features::{BloomFeature, FeatureRegistry, LightingFeature, ShadowsFeature, BillboardsFeature, RadianceCascadesFeature, BillboardInstance},
-    passes::AntiAliasingMode,
-};
+use helio::{BillboardInstance, Renderer, RendererConfig};
 
 use stratum::{
-    CameraId, CameraKind, Components, EntityId, LevelStreamer, LightData, Projection,
+    CameraId, CameraKind, Components, LevelStreamer, LightData, Projection,
     RenderTargetHandle, SimulationMode, SkyAtmosphereData, SkylightData,
     Stratum, StratumCamera, Transform, Viewport,
 };
@@ -30,29 +26,7 @@ use crate::camera::*;
 use crate::chunks::VoxelChunkManager;
 use crate::materials::MaterialPalette;
 use crate::terrain::*;
-use crate::player::{Player, update_player, PLAYER_WALK_SPEED};
-
-// ── Asset loading ───────────────────────────────────────────────────────────
-
-fn load_sprite(path: &str) -> (Vec<u8>, u32, u32) {
-    let asset_bytes: Option<&'static [u8]> = match path {
-        "probe.png"     => Some(include_bytes!("../../../assets/probe.png")),
-        "spotlight.png" => Some(include_bytes!("../../../assets/spotlight.png")),
-        _ => None,
-    };
-
-    let img = asset_bytes
-        .and_then(|bytes| image::load_from_memory(bytes).ok())
-        .unwrap_or_else(|| {
-            log::warn!("Could not decode embedded '{}', using 1x1 white fallback", path);
-            let mut px = image::RgbaImage::new(1, 1);
-            px.put_pixel(0, 0, image::Rgba([255, 255, 255, 255]));
-            image::DynamicImage::ImageRgba8(px)
-        })
-        .into_rgba8();
-    let (w, h) = img.dimensions();
-    (img.into_raw(), w, h)
-}
+use crate::player::{Player, update_player};
 
 // ── Level directory ─────────────────────────────────────────────────────────
 
@@ -180,31 +154,12 @@ impl ApplicationHandler for App {
             desired_maximum_frame_latency: 2,
         });
 
-        let (probe_rgba, probe_w, probe_h) = load_sprite("probe.png");
-
-        let features = FeatureRegistry::builder()
-            .with_feature(LightingFeature::new())
-            .with_feature(ShadowsFeature::new().with_atlas_size(2048).with_max_lights(4))
-            .with_feature(BloomFeature::new().with_intensity(0.1).with_threshold(2.0))
-            .with_feature(RadianceCascadesFeature::new().with_camera_follow([40.0, 20.0, 40.0]))
-            .with_feature(BillboardsFeature::new()
-                .with_sprite(probe_rgba, probe_w, probe_h)
-                .with_max_instances(8192))
-            .build();
-
         let renderer = Renderer::new(
             device.clone(), queue.clone(),
-            RendererConfig::new(size.width, size.height, fmt, features)
-                .with_aa(AntiAliasingMode::Taa)
-                .with_ssao(),
-        ).expect("renderer");
+            RendererConfig::new(size.width, size.height, fmt),
+        );
 
         let mut integration = HelioIntegration::new(renderer, AssetRegistry::new());
-
-        match integration.renderer_mut().start_live_portal_default() {
-            Ok(url) => log::info!("Helio live portal: {url}"),
-            Err(e)  => log::warn!("Could not start live portal: {e}"),
-        }
 
         let palette = MaterialPalette::new(&mut integration);
 
@@ -321,27 +276,13 @@ impl ApplicationHandler for App {
                 log::info!("Mode → {:?}", state.stratum.mode());
             }
 
-            // ── Pass toggle keys (1-9, 0) ─────────────────────────────────
+            // ── Pass toggle keys (1-9, 0) — helio v3 has no toggle_pass; use as noop ──
             WindowEvent::KeyboardInput { event: KeyEvent {
                 state: ElementState::Pressed,
-                physical_key: PhysicalKey::Code(code @ (KeyCode::Digit1 | KeyCode::Digit2 | KeyCode::Digit3 | KeyCode::Digit4 | KeyCode::Digit5 | KeyCode::Digit6 | KeyCode::Digit7 | KeyCode::Digit8 | KeyCode::Digit9 | KeyCode::Digit0)),
+                physical_key: PhysicalKey::Code(_code @ (KeyCode::Digit1 | KeyCode::Digit2 | KeyCode::Digit3 | KeyCode::Digit4 | KeyCode::Digit5 | KeyCode::Digit6 | KeyCode::Digit7 | KeyCode::Digit8 | KeyCode::Digit9 | KeyCode::Digit0)),
                 ..
             }, .. } => {
-                let pass_name = match code {
-                    KeyCode::Digit1 => "depth_prepass",
-                    KeyCode::Digit2 => "gbuffer",
-                    KeyCode::Digit3 => "deferred_lighting",
-                    KeyCode::Digit4 => "shadow",
-                    KeyCode::Digit5 => "geometry",
-                    KeyCode::Digit6 => "transparent",
-                    KeyCode::Digit7 => "sky",
-                    KeyCode::Digit8 => "radiance_cascades",
-                    KeyCode::Digit9 => "billboards",
-                    KeyCode::Digit0 => "ssao",
-                    _ => unreachable!(),
-                };
-                let enabled = state.integration.renderer_mut().toggle_pass(pass_name);
-                eprintln!("[Toggle] {} → {}", pass_name, if enabled { "ON" } else { "OFF" });
+                // helio v3 removed toggle_pass — passes are always active
             }
 
             // ── Probe visualization (P) ───────────────────────────────────
@@ -353,15 +294,12 @@ impl ApplicationHandler for App {
                 log::trace!("RC Probe Visualization → {}", if state.probe_vis { "ON" } else { "OFF" });
             }
 
-            // ── Live portal (L) ───────────────────────────────────────────
+            // ── Live portal (L) — removed in helio v3 ────────────────────
             WindowEvent::KeyboardInput { event: KeyEvent {
                 state: ElementState::Pressed,
                 physical_key: PhysicalKey::Code(KeyCode::KeyL), ..
             }, .. } => {
-                match state.integration.renderer_mut().start_live_portal_default() {
-                    Ok(url) => log::info!("Live portal: {url}"),
-                    Err(e)  => log::warn!("Portal error: {e}"),
-                }
+                log::info!("Live portal not available in helio v3");
             }
 
             WindowEvent::KeyboardInput { event: KeyEvent {
@@ -465,8 +403,7 @@ fn get_rc_probe_grid(camera_pos: Vec3) -> Vec<BillboardInstance> {
     // Billboard size: ~10% of the smallest cell dimension so probes are
     // clearly visible without overlapping.
     let probe_size = cell_y * 0.2; // 0.5 m
-    let size = [probe_size, probe_size];
-    let color = [0.0, 1.0, 1.0, 0.8]; // cyan
+    let color = [0.0, 1.0, 1.0, 0.8_f32]; // cyan
 
     let cap = (PROBE_DIM * PROBE_DIM * PROBE_DIM) as usize;
     let mut probes = Vec::with_capacity(cap);
@@ -477,10 +414,11 @@ fn get_rc_probe_grid(camera_pos: Vec3) -> Vec<BillboardInstance> {
                 let x = min_x + (px as f32 + 0.5) * cell_x;
                 let y = min_y + (py as f32 + 0.5) * cell_y;
                 let z = min_z + (pz as f32 + 0.5) * cell_z;
-                probes.push(
-                    BillboardInstance::new([x, y, z], size)
-                        .with_color(color)
-                );
+                probes.push(BillboardInstance {
+                    world_pos:   [x, y, z, 1.0],
+                    scale_flags: [probe_size, probe_size, 0.0, 0.0],
+                    color,
+                });
             }
         }
     }
@@ -574,26 +512,20 @@ impl AppState {
         self.stratum.tick(dt);
 
         let size  = self.window.inner_size();
-        let views = self.stratum.build_views(size.width, size.height, self.time);
+        let views = self.stratum.build_views(size.width, size.height);
         if views.is_empty() { return; }
 
-        // Inject RC probe billboards BEFORE frame submission so they are
-        // merged into the scene by HelioIntegration.
-        if self.probe_vis {
-            self.integration.set_extra_billboards(get_rc_probe_grid(cam_pos));
+        // Collect billboard instances for this frame
+        let billboards: Vec<BillboardInstance> = if self.probe_vis {
+            get_rc_probe_grid(cam_pos)
         } else {
-            self.integration.clear_extra_billboards();
-        }
+            vec![]
+        };
 
-        // RC bounds debug box (wireframe, via debug draw)
+        // RC bounds debug — helio v3 removed debug_box; log instead
         if self.rc_debug_bound {
             let (min, max) = get_rc_bounds(cam_pos);
-            let center = (min + max) * 0.5;
-            let half_extents = (max - min) * 0.5;
-            self.integration.renderer_mut().debug_box(
-                center, half_extents, glam::Quat::IDENTITY,
-                [1.0, 1.0, 0.0, 0.8], 0.05,
-            );
+            let _ = (min, max); // bounds computed but debug draw unavailable in v3
         }
 
         let output = match self.surface.get_current_texture() {
@@ -603,7 +535,7 @@ impl AppState {
         let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
         let level = self.stratum.active_level().expect("level");
 
-        if let Err(e) = self.integration.submit_frame(&views, level, &view, dt) {
+        if let Err(e) = self.integration.submit_frame(&views, level, &view, &billboards) {
             log::error!("Render error: {e:?}");
         }
 

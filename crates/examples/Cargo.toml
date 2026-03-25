@@ -22,7 +22,7 @@ path = "voxel_world/main.rs"
 [dependencies]
 stratum         = { workspace = true }
 stratum-helio   = { workspace = true }
-helio-render-v2 = { workspace = true }
+helio           = { workspace = true }
 wgpu            = { workspace = true }
 glam            = { workspace = true }
 winit           = { workspace = true }

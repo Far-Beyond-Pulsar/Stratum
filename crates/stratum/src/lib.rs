@@ -59,8 +59,8 @@ pub use chunk::{Chunk, ChunkCoord, ChunkState, Aabb};
 pub use partition::WorldPartition;
 pub use entity::{
     EntityId, EntityStore, Components, Transform,
-    MeshHandle, MaterialHandle, LightData, BillboardData,
-    SkylightData, SkyAtmosphereData,
+    MeshHandle, MaterialHandle, TextureHandle, LightData, BillboardData,
+    SkylightData, SkyAtmosphereData, GroupHint,
 };
 pub use camera::{CameraId, StratumCamera, CameraKind, Projection};
 pub use camera_registry::CameraRegistry;

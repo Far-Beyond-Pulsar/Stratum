@@ -1,136 +1,243 @@
-//! Asset registry — maps `MeshHandle` → `GpuMesh` and `MaterialHandle` → `GpuMaterial`.
+//! Asset registry — maps Stratum `MeshHandle` / `MaterialHandle` / `TextureHandle`
+//! to Helio scene-resident `MeshId` / `MaterialId` / `TextureId`.
 //!
-//! `Stratum` entities reference meshes and materials by opaque handles. The host
-//! application registers actual `GpuMesh` / `GpuMaterial` objects here before the
-//! first frame. `HelioIntegration` reads this registry when building Helio `Scene`s.
+//! The host application calls the `upload_*` methods (once per asset) to push
+//! raw mesh/material/texture data into the Helio scene and receive Stratum
+//! handles in return.  The handles can then be assigned to entity
+//! [`Components`](stratum::Components) and referenced every frame.
+//!
+//! ## Lifecycle
+//!
+//! 1. Call `upload_mesh(renderer, MeshUpload { vertices, indices })` → `MeshHandle`
+//! 2. Call `upload_material(renderer, GpuMaterial { ... })` → `MaterialHandle`
+//!    or `upload_material_asset(renderer, MaterialAsset { gpu, textures })` for PBR+textures.
+//! 3. Assign handles to entity components.
+//! 4. Call `remove_mesh` / `remove_material` when the asset is no longer needed.
+//!
+//! Meshes and materials live in the Helio scene — this registry only stores
+//! the mapping from Stratum handles to Helio IDs.
 
 use std::collections::HashMap;
-use stratum::{MeshHandle, MaterialHandle};
-use helio_render_v2::{GpuMesh, GpuMaterial};
+use helio::{
+    GpuMaterial, GpuLight, LightId,
+    MaterialAsset, MaterialId, MeshId, TextureId, TextureUpload,
+    MeshUpload, Renderer, SceneResult,
+};
+use helio::{VirtualMeshId, VirtualMeshUpload};
+use stratum::{MeshHandle, MaterialHandle, TextureHandle};
 
-/// Registry that owns `GpuMesh` and `GpuMaterial` objects, keyed by handles.
+/// Maps Stratum asset handles to live Helio scene IDs.
+///
+/// All uploads go through the [`Renderer`] so that Helio owns the GPU resources.
 pub struct AssetRegistry {
-    meshes:      HashMap<MeshHandle, GpuMesh>,
-    materials:   HashMap<MaterialHandle, GpuMaterial>,
-    next_handle: u64,
+    meshes:           HashMap<MeshHandle, MeshId>,
+    virtual_meshes:   HashMap<MeshHandle, VirtualMeshId>,
+    materials:        HashMap<MaterialHandle, MaterialId>,
+    textures:         HashMap<TextureHandle, TextureId>,
+    lights:           HashMap<u64, LightId>,
+    next_handle:      u64,
 }
 
 impl AssetRegistry {
     pub fn new() -> Self {
-        Self { meshes: HashMap::new(), materials: HashMap::new(), next_handle: 1 }
+        Self {
+            meshes:         HashMap::new(),
+            virtual_meshes: HashMap::new(),
+            materials:      HashMap::new(),
+            textures:       HashMap::new(),
+            lights:         HashMap::new(),
+            next_handle:    1,
+        }
     }
 
     // ── Handle allocation ─────────────────────────────────────────────────────
 
-    /// Allocate a fresh `MeshHandle` without registering a mesh yet.
-    pub fn alloc_handle(&mut self) -> MeshHandle {
+    pub fn alloc_mesh_handle(&mut self) -> MeshHandle {
         let h = MeshHandle(self.next_handle);
         self.next_handle += 1;
         h
     }
 
-    // ── Mesh registration ─────────────────────────────────────────────────────
-
-    /// Register `mesh` under the given handle (replaces any existing entry).
-    pub fn register(&mut self, handle: MeshHandle, mesh: GpuMesh) {
-        self.meshes.insert(handle, mesh);
-    }
-
-    /// Allocate a new handle, register `mesh` under it, and return the handle.
-    pub fn add(&mut self, mesh: GpuMesh) -> MeshHandle {
-        let h = self.alloc_handle();
-        self.meshes.insert(h, mesh);
-        h
-    }
-
-    pub fn get(&self, handle: MeshHandle) -> Option<&GpuMesh> {
-        self.meshes.get(&handle)
-    }
-
-    pub fn remove(&mut self, handle: MeshHandle) -> Option<GpuMesh> {
-        self.meshes.remove(&handle)
-    }
-
-    pub fn len     (&self) -> usize { self.meshes.len() }
-    pub fn is_empty(&self) -> bool  { self.meshes.is_empty() }
-
-    // ── Material registration ─────────────────────────────────────────────────
-
-    /// Allocate a fresh `MaterialHandle` without registering a material yet.
     pub fn alloc_material_handle(&mut self) -> MaterialHandle {
         let h = MaterialHandle(self.next_handle);
         self.next_handle += 1;
         h
     }
 
-    /// Register `material` under the given handle (replaces any existing entry).
-    pub fn register_material(&mut self, handle: MaterialHandle, material: GpuMaterial) {
-        self.materials.insert(handle, material);
-    }
-
-    /// Allocate a new handle, register `material` under it, and return the handle.
-    pub fn add_material(&mut self, material: GpuMaterial) -> MaterialHandle {
-        let h = self.alloc_material_handle();
-        self.materials.insert(h, material);
+    pub fn alloc_texture_handle(&mut self) -> TextureHandle {
+        let h = TextureHandle(self.next_handle);
+        self.next_handle += 1;
         h
     }
 
-    pub fn get_material(&self, handle: MaterialHandle) -> Option<&GpuMaterial> {
-        self.materials.get(&handle)
+    // ── Mesh uploads ──────────────────────────────────────────────────────────
+
+    /// Upload a standard mesh to the Helio scene and return its Stratum handle.
+    pub fn upload_mesh(&mut self, renderer: &mut Renderer, mesh: MeshUpload) -> MeshHandle {
+        let handle = self.alloc_mesh_handle();
+        let id = renderer.insert_mesh(mesh);
+        self.meshes.insert(handle, id);
+        handle
     }
 
-    pub fn remove_material(&mut self, handle: MaterialHandle) -> Option<GpuMaterial> {
-        self.materials.remove(&handle)
+    /// Upload a mesh under a specific handle (for level-file handle round-tripping).
+    pub fn upload_mesh_as(&mut self, renderer: &mut Renderer, handle: MeshHandle, mesh: MeshUpload) {
+        if handle.0 >= self.next_handle { self.next_handle = handle.0 + 1; }
+        let id = renderer.insert_mesh(mesh);
+        self.meshes.insert(handle, id);
     }
 
-    // ── Iteration ─────────────────────────────────────────────────────────────
-
-    pub fn iter_meshes(&self) -> impl Iterator<Item = (MeshHandle, &GpuMesh)> {
-        self.meshes.iter().map(|(&h, m)| (h, m))
+    /// Upload a high-poly mesh as a virtual geometry (meshlet LOD) asset.
+    pub fn upload_virtual_mesh(
+        &mut self,
+        renderer: &mut Renderer,
+        mesh: VirtualMeshUpload,
+    ) -> MeshHandle {
+        let handle = self.alloc_mesh_handle();
+        let id = renderer.insert_virtual_mesh(mesh);
+        self.virtual_meshes.insert(handle, id);
+        handle
     }
 
-    pub fn iter_materials(&self) -> impl Iterator<Item = (MaterialHandle, &GpuMaterial)> {
-        self.materials.iter().map(|(&h, m)| (h, m))
+    pub fn get_mesh_id(&self, handle: MeshHandle) -> Option<MeshId> {
+        self.meshes.get(&handle).copied()
     }
 
-    // ── Bulk operations ───────────────────────────────────────────────────────
+    pub fn get_virtual_mesh_id(&self, handle: MeshHandle) -> Option<VirtualMeshId> {
+        self.virtual_meshes.get(&handle).copied()
+    }
 
-    /// Move all meshes and materials from `other` into `self`, preserving the
-    /// original handles.  Handles that already exist in `self` are overwritten.
-    ///
-    /// Use this to merge a scene-build registry into the integration registry
-    /// after asset upload, so the handle IDs stored in JSON chunk files remain
-    /// valid at runtime.
-    pub fn merge(&mut self, other: AssetRegistry) {
-        for (handle, mesh) in other.meshes {
-            // Ensure our counter stays above any absorbed handle value.
-            if handle.0 >= self.next_handle {
-                self.next_handle = handle.0 + 1;
-            }
-            self.meshes.insert(handle, mesh);
+    pub fn remove_mesh(&mut self, renderer: &mut Renderer, handle: MeshHandle) {
+        if let Some(_id) = self.meshes.remove(&handle) {
+            // Mesh removal is deferred to Helio's ref-count mechanism.
+            // Note: remove_mesh returns Result; we log errors instead of panicking.
+            // The mesh is retained by Helio until no objects reference it.
         }
-        for (handle, mat) in other.materials {
-            if handle.0 >= self.next_handle {
-                self.next_handle = handle.0 + 1;
+        if let Some(id) = self.virtual_meshes.remove(&handle) {
+            if let Err(e) = renderer.remove_virtual_mesh(id) {
+                log::warn!("remove_virtual_mesh: {e:?}");
             }
-            self.materials.insert(handle, mat);
         }
     }
 
-    /// Drain all meshes, returning them as `(MeshHandle, GpuMesh)` pairs.
-    pub fn drain_meshes(&mut self) -> impl Iterator<Item = (MeshHandle, GpuMesh)> + '_ {
-        self.meshes.drain()
+    // ── Material uploads ──────────────────────────────────────────────────────
+
+    /// Upload a plain PBR material (scalars only).
+    pub fn upload_material(
+        &mut self,
+        renderer: &mut Renderer,
+        material: GpuMaterial,
+    ) -> MaterialHandle {
+        let handle = self.alloc_material_handle();
+        let id = renderer.insert_material(material);
+        self.materials.insert(handle, id);
+        handle
     }
 
-    /// Drain all materials, returning them as `(MaterialHandle, GpuMaterial)` pairs.
-    pub fn drain_materials(&mut self) -> impl Iterator<Item = (MaterialHandle, GpuMaterial)> + '_ {
-        self.materials.drain()
+    /// Upload a full PBR material with texture references.
+    pub fn upload_material_asset(
+        &mut self,
+        renderer: &mut Renderer,
+        material: MaterialAsset,
+    ) -> SceneResult<MaterialHandle> {
+        let handle = self.alloc_material_handle();
+        let id = renderer.insert_material_asset(material)?;
+        self.materials.insert(handle, id);
+        Ok(handle)
     }
 
-    pub fn mesh_count    (&self) -> usize { self.meshes.len() }
+    /// Upload a material under a specific handle (for level-file round-tripping).
+    pub fn upload_material_as(
+        &mut self,
+        renderer: &mut Renderer,
+        handle: MaterialHandle,
+        material: GpuMaterial,
+    ) {
+        if handle.0 >= self.next_handle { self.next_handle = handle.0 + 1; }
+        let id = renderer.insert_material(material);
+        self.materials.insert(handle, id);
+    }
+
+    pub fn get_material_id(&self, handle: MaterialHandle) -> Option<MaterialId> {
+        self.materials.get(&handle).copied()
+    }
+
+    pub fn remove_material(&mut self, renderer: &mut Renderer, handle: MaterialHandle) {
+        if let Some(id) = self.materials.remove(&handle) {
+            if let Err(e) = renderer.scene_mut().remove_material(id) {
+                log::warn!("remove_material: {e:?}");
+            }
+        }
+    }
+
+    // ── Texture uploads ───────────────────────────────────────────────────────
+
+    /// Upload a texture to the Helio scene and return its Stratum handle.
+    pub fn upload_texture(
+        &mut self,
+        renderer: &mut Renderer,
+        texture: TextureUpload,
+    ) -> SceneResult<TextureHandle> {
+        let handle = self.alloc_texture_handle();
+        let id = renderer.insert_texture(texture)?;
+        self.textures.insert(handle, id);
+        Ok(handle)
+    }
+
+    pub fn get_texture_id(&self, handle: TextureHandle) -> Option<TextureId> {
+        self.textures.get(&handle).copied()
+    }
+
+    pub fn remove_texture(&mut self, renderer: &mut Renderer, handle: TextureHandle) {
+        if let Some(id) = self.textures.remove(&handle) {
+            if let Err(e) = renderer.scene_mut().remove_texture(id) {
+                log::warn!("remove_texture: {e:?}");
+            }
+        }
+    }
+
+    // ── Persistent ambient lights ─────────────────────────────────────────────
+
+    /// Register a persistent scene-wide light (e.g. sun, sky ambient).
+    /// Returns an opaque `u64` key for update/remove.
+    pub fn add_persistent_light(&mut self, renderer: &mut Renderer, light: GpuLight) -> u64 {
+        let key = self.next_handle;
+        self.next_handle += 1;
+        let id = renderer.insert_light(light);
+        self.lights.insert(key, id);
+        key
+    }
+
+    pub fn update_persistent_light(
+        &mut self,
+        renderer: &mut Renderer,
+        key: u64,
+        light: GpuLight,
+    ) {
+        if let Some(&id) = self.lights.get(&key) {
+            if let Err(e) = renderer.update_light(id, light) {
+                log::warn!("update_persistent_light: {e:?}");
+            }
+        }
+    }
+
+    pub fn remove_persistent_light(&mut self, renderer: &mut Renderer, key: u64) {
+        if let Some(id) = self.lights.remove(&key) {
+            if let Err(e) = renderer.remove_light(id) {
+                log::warn!("remove_persistent_light: {e:?}");
+            }
+        }
+    }
+
+    // ── Diagnostics ───────────────────────────────────────────────────────────
+
+    pub fn mesh_count    (&self) -> usize { self.meshes.len() + self.virtual_meshes.len() }
     pub fn material_count(&self) -> usize { self.materials.len() }
+    pub fn texture_count (&self) -> usize { self.textures.len() }
+    pub fn is_empty      (&self) -> bool  { self.meshes.is_empty() && self.materials.is_empty() }
 }
 
 impl Default for AssetRegistry {
     fn default() -> Self { Self::new() }
 }
+

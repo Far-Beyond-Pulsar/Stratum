@@ -59,17 +59,24 @@ impl Transform {
     }
 }
 
+/// Opaque reference to a GPU texture asset.
+///
+/// The `stratum-helio` integration crate maintains an `AssetRegistry` that
+/// maps `TextureHandle → helio::TextureId`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TextureHandle(pub u64);
+
 /// Opaque reference to a GPU mesh asset.
 ///
 /// Stratum never touches GPU resources. The `stratum-helio` integration crate
-/// maintains an `AssetRegistry` that maps `MeshHandle → GpuMesh`.
+/// maintains an `AssetRegistry` that maps `MeshHandle → helio::MeshId`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct MeshHandle(pub u64);
 
 /// Opaque reference to a GPU material asset.
 ///
 /// Stratum never touches GPU resources. The `stratum-helio` integration crate
-/// maintains an `AssetRegistry` that maps `MaterialHandle → GpuMaterial`.
+/// maintains an `AssetRegistry` that maps `MaterialHandle → helio::MaterialId`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct MaterialHandle(pub u64);
 
@@ -113,7 +120,8 @@ impl LightData {
 /// Attach to an entity (alongside `SkyAtmosphereData`) to enable sky-based
 /// ambient irradiance.  Position is irrelevant — the skylight is scene-global.
 ///
-/// Mirrors `helio_render_v2::scene::Skylight`.
+/// Note: sky/atmosphere integration depends on renderer support.
+/// Currently stored as scene data; renderer integration is renderer-specific.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SkylightData {
     /// Multiplier applied to the computed sky ambient colour.
@@ -141,8 +149,8 @@ impl SkylightData {
 /// Attach to an entity to enable atmospheric sky rendering.  Integrates with
 /// the first directional light in the scene to position the sun disc.
 ///
-/// Mirrors `helio_render_v2::scene::SkyAtmosphere` (minus clouds, which are
-/// not yet exposed through Stratum).
+/// Note: sky/atmosphere integration depends on renderer support.
+/// Currently stored as scene data; renderer integration is renderer-specific.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SkyAtmosphereData {
     /// Per-wavelength Rayleigh scattering coefficients (R/G/B).
@@ -221,6 +229,35 @@ impl BillboardData {
     }
 }
 
+/// Renderer group hint — controls which Helio `GroupId` an entity is assigned to.
+///
+/// Groups enable O(1) batch show/hide and batch transforms via `GroupMask`.
+/// Objects with `GroupHint::None` belong to no group and are always visible.
+///
+/// Mapped by `stratum-helio` to `helio::GroupId` constants:
+/// | `GroupHint`     | `GroupId`            |
+/// |-----------------|----------------------|
+/// | `None`          | `GroupMask::NONE`    |
+/// | `Static`        | `GroupId::STATIC`    |
+/// | `Dynamic`       | `GroupId::DYNAMIC`   |
+/// | `ShadowOnly`    | `GroupId::SHADOW_CASTERS` |
+/// | `Editor`        | `GroupId::EDITOR`    |
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GroupHint {
+    /// No group — always visible, not batch-controllable.
+    #[default]
+    None,
+    /// Persistent world geometry (terrain, buildings, props).
+    /// `optimize_scene_layout()` will sort these for instanced draw calls.
+    Static,
+    /// Moving entities (characters, vehicles, projectiles).
+    Dynamic,
+    /// Shadow-casting only; not directly visible.
+    ShadowOnly,
+    /// Editor-only helpers (gizmos, icons); hidden in game mode.
+    Editor,
+}
+
 /// All components an entity may carry.
 ///
 /// All fields are optional. Stratum processes only the components that are
@@ -251,6 +288,17 @@ pub struct Components {
     /// * Light-only entity             → leave at `0.0`; light range is used.
     /// * Unset (`0.0`)                 → 50 m conservative fallback.
     pub bounding_radius: f32,
+    /// Helio renderer group hint.
+    ///
+    /// Controls which `GroupId` the entity is assigned to in the GPU scene.
+    /// Groups enable zero-cost batch visibility and batch transforms.
+    /// See [`GroupHint`] for available options.
+    pub group_hint:      GroupHint,
+    /// When `true`, the mesh is submitted as a `VirtualObject` (meshlet-based
+    /// LOD rendering). Requires the `MeshHandle` to reference a mesh uploaded
+    /// via `AssetRegistry::upload_virtual_mesh`. Large, complex meshes
+    /// (terrain, foliage, buildings > 10 k triangles) benefit most.
+    pub use_virtual_geometry: bool,
     /// Arbitrary string tags for runtime queries (e.g., "player", "static").
     pub tags:            Vec<String>,
 }
@@ -266,6 +314,8 @@ impl Components {
     pub fn with_sky_atmosphere (mut self, a: SkyAtmosphereData)  -> Self { self.sky_atmosphere   = Some(a); self }
     pub fn with_billboard      (mut self, b: BillboardData)      -> Self { self.billboard        = Some(b); self }
     pub fn with_bounding_radius(mut self, r: f32)          -> Self { self.bounding_radius  = r;       self }
+    pub fn with_group_hint     (mut self, g: GroupHint)    -> Self { self.group_hint       = g;       self }
+    pub fn with_virtual_geometry(mut self) -> Self { self.use_virtual_geometry = true; self }
     pub fn with_tag(mut self, tag: impl Into<String>) -> Self {
         self.tags.push(tag.into()); self
     }

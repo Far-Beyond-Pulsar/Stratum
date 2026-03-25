@@ -155,12 +155,19 @@ mod tests {
 pub struct RenderView {
     /// Which camera produced this view (for diagnostics / post-processing).
     pub camera_id:        CameraId,
-    /// Combined view-projection matrix (column-major, right-hand).
+    /// World-to-camera (view) matrix. Separate from `proj` so the integration
+    /// layer can pass both to `helio::Camera::from_matrices`.
+    pub view:             Mat4,
+    /// Camera-to-clip (projection) matrix (reversed-Z, right-hand).
+    pub proj:             Mat4,
+    /// Combined view-projection matrix — kept for frustum culling on the Stratum side.
     pub view_proj:        Mat4,
     /// Camera eye position in world space (used for lighting attenuation, fog).
     pub camera_position:  Vec3,
-    /// Frame time in seconds (forwarded to shader `globals.time`).
-    pub time:             f32,
+    /// Near clip plane distance (metres).
+    pub near:             f32,
+    /// Far clip plane distance (metres).
+    pub far:              f32,
     /// Where to render this view.
     pub render_target:    RenderTargetHandle,
     /// Normalized viewport rectangle within the render target.

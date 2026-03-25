@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use glam::Vec3;
-use helio_render_v2::{GpuMesh, PackedVertex, Renderer};
+use helio::{MeshUpload, PackedVertex};
 
 use stratum::{
     chunk_on_disk, ChunkCoord, Components, EntityId, Level,
@@ -124,7 +124,8 @@ impl VoxelChunkManager {
             for coord in excess {
                 if let Some((ids, mesh_handles)) = self.dormant.remove(&coord) {
                     for id in ids        { level.despawn_entity(id); }
-                    for mh in mesh_handles { assets.remove(mh); }
+                    // mesh handles are now managed by the renderer; just drop them
+                    let _ = mesh_handles;
                 }
             }
         }
@@ -208,7 +209,7 @@ impl VoxelChunkManager {
             match event {
                 StreamEvent::ChunkReady { coord, data } => {
                     self.in_flight.remove(&coord);
-                    let (submeshes, solid) = build_chunk_mesh(integration.renderer_mut(), data, palette);
+                    let (submeshes, solid) = build_chunk_mesh(data, palette);
                     let cx = coord.x as f32 * CHUNK_SIZE + CHUNK_SIZE * 0.5;
                     let cy = coord.y as f32 * CHUNK_SIZE + CHUNK_SIZE * 0.5;
                     let cz = coord.z as f32 * CHUNK_SIZE + CHUNK_SIZE * 0.5;
@@ -217,8 +218,8 @@ impl VoxelChunkManager {
                     let mut ids = Vec::new();
                     let mut mesh_handles = Vec::new();
 
-                    for (gpu_mesh, mat) in submeshes {
-                        let mesh_h = integration.assets_mut().add(gpu_mesh);
+                    for (mesh_upload, mat) in submeshes {
+                        let mesh_h = integration.upload_mesh(mesh_upload);
                         mesh_handles.push(mesh_h);
                         ids.push(level.spawn_entity(
                             Components::new()
@@ -326,10 +327,9 @@ fn regenerate_chunk_terrain(
 // ── Face-culled mesh builder ────────────────────────────────────────────────
 
 fn build_chunk_mesh(
-    renderer: &mut Renderer,
     chunk:    ChunkFile,
     palette:  &MaterialPalette,
-) -> (Vec<(GpuMesh, MaterialHandle)>, HashMap<(i32, i32, i32), Block>) {
+) -> (Vec<(MeshUpload, MaterialHandle)>, HashMap<(i32, i32, i32), Block>) {
     // Collect solid voxels keyed by their integer min-corner.
     let mut solid: HashMap<(i32, i32, i32), Block> = HashMap::new();
 
@@ -405,7 +405,7 @@ fn build_chunk_mesh(
             let tangent = [td[0] / tl, td[1] / tl, td[2] / tl];
 
             for (ci, corner) in corners.iter().enumerate() {
-                v.push(PackedVertex::new_with_tangent(
+                v.push(PackedVertex::from_components(
                     [
                         bx as f32 + corner[0] - chunk_cx,
                         by as f32 + corner[1] - chunk_cy,
@@ -414,6 +414,7 @@ fn build_chunk_mesh(
                     *normal,
                     UVS[ci],
                     tangent,
+                    1.0,
                 ));
             }
             ix.extend_from_slice(&[
@@ -427,7 +428,7 @@ fn build_chunk_mesh(
     for (block, v) in verts {
         if v.is_empty() { continue; }
         let ix = idxs.remove(&block).unwrap_or_default();
-        result.push((renderer.create_mesh(&v, &ix), palette.handle_for(block)));
+        result.push((MeshUpload { vertices: v, indices: ix }, palette.handle_for(block)));
     }
     (result, solid)
 }

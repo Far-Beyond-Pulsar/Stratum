@@ -97,6 +97,14 @@ impl Projection {
                 Mat4::orthographic_rh(left, right, bottom, top, near, far),
         }
     }
+
+    /// Return the (near, far) clip distances.
+    pub fn near_far(&self) -> (f32, f32) {
+        match *self {
+            Self::Perspective { near, far, .. } => (near, far),
+            Self::Orthographic { near, far, .. } => (near, far),
+        }
+    }
 }
 
 // ── StratumCamera ─────────────────────────────────────────────────────────────
