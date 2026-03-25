@@ -125,11 +125,11 @@ impl ApplicationHandler for App {
         let (device, queue) = pollster::block_on(adapter.request_device(
             &wgpu::DeviceDescriptor {
                 label:                 Some("voxel device"),
-                required_features:     wgpu::Features::EXPERIMENTAL_RAY_QUERY
+                required_features:     helio::required_wgpu_features(adapter.features())
+                                       | wgpu::Features::EXPERIMENTAL_RAY_QUERY
                                        | wgpu::Features::TIMESTAMP_QUERY
                                        | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS,
-                required_limits:       wgpu::Limits::default()
-                    .using_minimum_supported_acceleration_structure_values(),
+                required_limits:       helio::required_wgpu_limits(adapter.limits()),
                 memory_hints:          wgpu::MemoryHints::default(),
                 experimental_features: unsafe { wgpu::ExperimentalFeatures::enabled() },
                 trace:                 wgpu::Trace::Off,
