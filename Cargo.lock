@@ -746,6 +746,7 @@ dependencies = [
  "bytemuck",
  "glam",
  "helio-pass-billboard",
+ "helio-pass-debug",
  "helio-pass-deferred-light",
  "helio-pass-depth-prepass",
  "helio-pass-fxaa",
@@ -773,6 +774,16 @@ dependencies = [
 
 [[package]]
 name = "helio-pass-billboard"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "helio-v3",
+ "libhelio",
+ "wgpu",
+]
+
+[[package]]
+name = "helio-pass-debug"
 version = "0.1.0"
 dependencies = [
  "bytemuck",

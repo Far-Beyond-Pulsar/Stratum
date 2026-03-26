@@ -45,7 +45,6 @@ use helio::{
 
 use crate::asset_registry::AssetRegistry;
 use crate::bridge::{render_view_to_camera, stratum_light_to_gpu_light};
-use bytemuck::Zeroable;
 
 // ── GroupHint → GroupMask mapping ─────────────────────────────────────────────
 

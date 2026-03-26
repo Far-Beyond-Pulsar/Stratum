@@ -31,6 +31,21 @@ const MAX_UPLOADS_PER_FRAME: usize = 4;
 /// triggering the full despawn + GPU-free path.
 const DORMANT_CAP: usize = 256;
 
+/// Conservative chunk sphere radius in world units: half-cube diagonal.
+/// a chunk is 32 units side → radius=16 * sqrt(3) ≈ 27.7128.
+const SQRT_3: f32 = 1.732_050_8;
+const CHUNK_BOUNDING_RADIUS: f32 = CHUNK_SIZE * 0.5 * SQRT_3;
+
+/// Chunk center in world-space, to avoid baking world positions into meshes and
+/// leaving transform as identity (which breaks Hi-Z occlusion bounds center).
+fn chunk_center(coord: ChunkCoord) -> Vec3 {
+    Vec3::new(
+        coord.x as f32 * CHUNK_SIZE + CHUNK_SIZE * 0.5,
+        coord.y as f32 * CHUNK_SIZE + CHUNK_SIZE * 0.5,
+        coord.z as f32 * CHUNK_SIZE + CHUNK_SIZE * 0.5,
+    )
+}
+
 // ── VoxelChunkManager ───────────────────────────────────────────────────────
 
 pub struct VoxelChunkManager {
@@ -210,10 +225,7 @@ impl VoxelChunkManager {
                 StreamEvent::ChunkReady { coord, data } => {
                     self.in_flight.remove(&coord);
                     let (submeshes, solid) = build_chunk_mesh(data, palette);
-                    let cx = coord.x as f32 * CHUNK_SIZE + CHUNK_SIZE * 0.5;
-                    let cy = coord.y as f32 * CHUNK_SIZE + CHUNK_SIZE * 0.5;
-                    let cz = coord.z as f32 * CHUNK_SIZE + CHUNK_SIZE * 0.5;
-                    let chunk_centre = Vec3::new(cx, cy, cz);
+                    let chunk_centre = chunk_center(coord);
 
                     let mut ids = Vec::new();
                     let mut mesh_handles = Vec::new();
@@ -226,7 +238,7 @@ impl VoxelChunkManager {
                                 .with_transform(Transform::from_position(chunk_centre))
                                 .with_mesh(mesh_h)
                                 .with_material(mat)
-                                .with_bounding_radius(CHUNK_SIZE * 2.5),
+                                .with_bounding_radius(CHUNK_BOUNDING_RADIUS),
                         ));
                     }
 
@@ -369,13 +381,10 @@ fn build_chunk_mesh(
     ];
     const UVS: [[f32; 2]; 4] = [[0., 0.], [1., 0.], [1., 1.], [0., 1.]];
 
-    // Mesh vertices are stored in local space relative to chunk_centre so that
-    // the instance model matrix (a translation by chunk_centre) maps them back
-    // to the correct world position.  This must match the Transform used when
-    // spawning the entity in flush_events.
-    let chunk_cx = coord.x as f32 * CHUNK_SIZE + CHUNK_SIZE * 0.5;
-    let chunk_cy = coord.y as f32 * CHUNK_SIZE + CHUNK_SIZE * 0.5;
-    let chunk_cz = coord.z as f32 * CHUNK_SIZE + CHUNK_SIZE * 0.5;
+    // Mesh vertices are stored in local space around chunk_centre, and the
+    // object transform is set to chunk_centre so Hi-Z uses the object position
+    // (not baked-in vertex world coordinates) for occlusion bounds.
+    let chunk_centre = chunk_center(coord);
 
     let mut verts: HashMap<Block, Vec<PackedVertex>> = HashMap::new();
     let mut idxs:  HashMap<Block, Vec<u32>>          = HashMap::new();
@@ -407,9 +416,9 @@ fn build_chunk_mesh(
             for (ci, corner) in corners.iter().enumerate() {
                 v.push(PackedVertex::from_components(
                     [
-                        bx as f32 + corner[0] - chunk_cx,
-                        by as f32 + corner[1] - chunk_cy,
-                        bz as f32 + corner[2] - chunk_cz,
+                        bx as f32 + corner[0] - chunk_centre.x,
+                        by as f32 + corner[1] - chunk_centre.y,
+                        bz as f32 + corner[2] - chunk_centre.z,
                     ],
                     *normal,
                     UVS[ci],
@@ -431,4 +440,21 @@ fn build_chunk_mesh(
         result.push((MeshUpload { vertices: v, indices: ix }, palette.handle_for(block)));
     }
     (result, solid)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use glam::Vec3;
+
+    #[test]
+    fn chunk_center_matches_world_space_origin() {
+        let coord = ChunkCoord { x: 1, y: 2, z: -3 };
+        let center = chunk_center(coord);
+        assert_eq!(center, Vec3::new(
+            1.0 * CHUNK_SIZE + CHUNK_SIZE * 0.5,
+            2.0 * CHUNK_SIZE + CHUNK_SIZE * 0.5,
+            -3.0 * CHUNK_SIZE + CHUNK_SIZE * 0.5,
+        ));
+    }
 }
