@@ -7,7 +7,7 @@ publish = false
 
 [[bin]]
 name = "basic_world"
-path = "basic_world.rs"
+path = "src/basic_world.rs"
 
 [dependencies]
 stratum = { workspace = true }
