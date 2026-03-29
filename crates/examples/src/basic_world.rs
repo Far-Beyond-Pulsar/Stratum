@@ -3,11 +3,11 @@ use std::{fs, path::PathBuf, sync::Arc, time::{Duration, Instant}};
 
 use wgpu::{Backends, DeviceDescriptor, InstanceDescriptor, PowerPreference, SurfaceConfiguration, Features, Limits};
 use winit::{
-    application::{ApplicationHandler, ActiveEventLoop},
+    application::ApplicationHandler,
     dpi::LogicalSize,
-    event::{ElementState, Event, KeyEvent, WindowEvent},
-    event_loop::EventLoop,
-    keyboard::KeyCode,
+    event::{ElementState, KeyEvent, WindowEvent},
+    event_loop::{ActiveEventLoop, EventLoop},
+    keyboard::Key,
     window::{Window, WindowAttributes, WindowId},
 };
 
@@ -238,13 +238,13 @@ impl ApplicationHandler for AppState {
             WindowEvent::Resized(size) => {
                 self.maybe_resize_surface(size);
             }
-            WindowEvent::ScaleFactorChanged { inner_size_writer, .. } => {
+            WindowEvent::ScaleFactorChanged { mut inner_size_writer, .. } => {
                 let size = self.window.as_ref().map(|w| w.inner_size()).unwrap_or_else(|| LogicalSize::new(1280.0, 720.0).to_physical(1.0));
-                inner_size_writer.set_inner_size(size);
+                inner_size_writer.request_inner_size(size);
                 self.maybe_resize_surface(size);
             }
             WindowEvent::KeyboardInput { event: KeyEvent { logical_key, state, .. }, .. } => {
-                if logical_key == KeyCode::Escape && state == ElementState::Pressed {
+                if logical_key == Key::Named(winit::keyboard::NamedKey::Escape) && state == ElementState::Pressed {
                     event_loop.exit();
                 }
             }
