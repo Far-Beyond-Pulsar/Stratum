@@ -1,5 +1,5 @@
 [package]
-name = "stratum-examples"
+name = "examples"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.70"
@@ -7,7 +7,7 @@ publish = false
 
 [[bin]]
 name = "basic_world"
-path = "src/basic_world.rs"
+path = "basic_world.rs"
 
 [dependencies]
 stratum = { workspace = true }
