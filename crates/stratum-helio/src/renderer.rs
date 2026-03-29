@@ -81,6 +81,55 @@ impl StratumRenderer {
         self.renderer.debug_line([0.0, -cross_size, 0.0], [0.0, cross_size, 0.0], [1.0, 1.0, 0.0, 1.0]);
         self.renderer.debug_line([0.0, 0.0, -cross_size], [0.0, 0.0, cross_size], [1.0, 1.0, 0.0, 1.0]);
 
+        // Draw line from origin to camera (white) - should always be visible if camera position is correct
+        self.renderer.debug_line([0.0, 0.0, 0.0], stratum_camera.position.to_array(), [1.0, 1.0, 1.0, 1.0]);
+
+        // Draw camera position as a LARGE bright sphere (hard to miss)
+        self.renderer.debug_sphere(stratum_camera.position.to_array(), 5.0, [1.0, 1.0, 0.0, 1.0], 16);
+
+        // Draw camera forward direction (what chunk system sees)
+        let cam_forward_start = stratum_camera.position;
+        let cam_forward_end = stratum_camera.position + stratum_camera.forward * 100.0;
+        self.renderer.debug_line(cam_forward_start.to_array(), cam_forward_end.to_array(), [1.0, 0.0, 1.0, 1.0]); // Magenta
+
+        // Draw crosses along forward direction to show the "trail"
+        for i in 1..=10 {
+            let dist = i as f32 * 10.0;
+            let point = stratum_camera.position + stratum_camera.forward * dist;
+            let cross_size = 2.0;
+            let color = [1.0, 0.0, 1.0, 1.0]; // Magenta
+
+            // Draw 3D cross at this point
+            self.renderer.debug_line(
+                (point - Vec3::X * cross_size).to_array(),
+                (point + Vec3::X * cross_size).to_array(),
+                color
+            );
+            self.renderer.debug_line(
+                (point - Vec3::Y * cross_size).to_array(),
+                (point + Vec3::Y * cross_size).to_array(),
+                color
+            );
+            self.renderer.debug_line(
+                (point - Vec3::Z * cross_size).to_array(),
+                (point + Vec3::Z * cross_size).to_array(),
+                color
+            );
+        }
+
+        // Draw camera right direction
+        let cam_right = stratum_camera.right();
+        let cam_right_end = stratum_camera.position + cam_right * 20.0;
+        self.renderer.debug_line(cam_forward_start.to_array(), cam_right_end.to_array(), [0.0, 1.0, 1.0, 1.0]); // Cyan
+
+        // Draw camera up direction
+        let cam_up_end = stratum_camera.position + stratum_camera.up() * 20.0;
+        self.renderer.debug_line(cam_forward_start.to_array(), cam_up_end.to_array(), [1.0, 1.0, 0.0, 1.0]); // Yellow
+
+        // Log camera info with rotation
+        log::info!("Camera pos: {:?}, forward: {:?}, right: {:?}, up: {:?}",
+            stratum_camera.position, stratum_camera.forward, stratum_camera.right(), stratum_camera.up());
+
         // Draw visible chunks as wireframe boxes
         let mut visible_count = 0;
         for chunk in world.chunks.values() {
