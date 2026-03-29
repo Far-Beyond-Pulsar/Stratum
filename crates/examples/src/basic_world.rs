@@ -71,17 +71,23 @@ impl AppState {
         self.camera_id = Some(cam_id);
     }
 
+    fn clamp_surface_size(max_dim: u32, size: winit::dpi::PhysicalSize<u32>) -> winit::dpi::PhysicalSize<u32> {
+        let width = size.width.max(1).min(max_dim);
+        let height = size.height.max(1).min(max_dim);
+        winit::dpi::PhysicalSize::new(width, height)
+    }
+
     fn maybe_resize_surface(&mut self, size: winit::dpi::PhysicalSize<u32>) {
         if let (Some(ref surface), Some(ref device), Some(ref mut config)) = (
             &self.surface,
             &self.device,
             &mut self.config,
         ) {
-            if size.width > 0 && size.height > 0 {
-                config.width = size.width;
-                config.height = size.height;
-                surface.configure(device, config);
-            }
+            let max_dim = device.limits().max_texture_dimension_2d as u32;
+            let size = Self::clamp_surface_size(max_dim, size);
+            config.width = size.width;
+            config.height = size.height;
+            surface.configure(device, config);
         }
     }
 
@@ -202,13 +208,15 @@ impl ApplicationHandler for AppState {
 
         let caps = surface.get_capabilities(&adapter);
         let format = caps.formats[0];
-        let size = arc_window.inner_size();
+        let max_size = adapter.limits().max_texture_dimension_2d as u32;
+        let raw_size = arc_window.inner_size();
+        let size = winit::dpi::PhysicalSize::new(raw_size.width.max(1).min(max_size), raw_size.height.max(1).min(max_size));
 
         let config = SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
-            width: size.width.max(1),
-            height: size.height.max(1),
+            width: size.width,
+            height: size.height,
             present_mode: caps.present_modes[0],
             alpha_mode: caps.alpha_modes[0],
             desired_maximum_frame_latency: 2,
