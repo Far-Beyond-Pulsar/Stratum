@@ -9,6 +9,7 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 stratum = { workspace = true }
 helio = { workspace = true }
+wgpu = { workspace = true }
 glam = { workspace = true }
 log = { workspace = true }
 thiserror = { workspace = true }

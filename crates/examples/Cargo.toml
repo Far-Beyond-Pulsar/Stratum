@@ -9,13 +9,19 @@ publish = false
 name = "basic_world"
 path = "src/basic_world.rs"
 
+
+[[bin]]
+name = "visual_world"
+path = "src/visual_world.rs"
+
 [dependencies]
 stratum = { workspace = true }
 stratum-helio = { workspace = true }
 helio = { workspace = true }
-wgpu = { workspace = true }
 glam = { workspace = true }
 winit = { workspace = true }
+wgpu = { workspace = true }
 pollster = { workspace = true }
 env_logger = { workspace = true }
 log = { workspace = true }
+bytemuck = { workspace = true }

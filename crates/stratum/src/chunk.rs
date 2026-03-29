@@ -107,6 +107,14 @@ impl Chunk {
         self.state == ChunkState::Loading
     }
 
+    /// Mark chunk as loaded without actually loading from disk (for demos/testing).
+    pub fn mark_loaded(&mut self) {
+        if matches!(self.state, ChunkState::Unloaded | ChunkState::Loading) {
+            self.state = ChunkState::Loaded;
+            self.load_start_time = None;
+        }
+    }
+
     /// Check if the chunk is unloaded or being evicted.
     pub fn is_unloaded(&self) -> bool {
         matches!(self.state, ChunkState::Unloaded | ChunkState::Evicting)
