@@ -13,6 +13,7 @@ path = "basic_world.rs"
 stratum = { workspace = true }
 stratum-helio = { workspace = true }
 helio = { workspace = true }
+wgpu = { workspace = true }
 glam = { workspace = true }
 winit = { workspace = true }
 pollster = { workspace = true }
