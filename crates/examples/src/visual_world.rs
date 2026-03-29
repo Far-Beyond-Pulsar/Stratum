@@ -49,8 +49,8 @@ impl CameraController {
         match key {
             KeyCode::KeyW => self.forward = pressed,
             KeyCode::KeyS => self.backward = pressed,
-            KeyCode::KeyA => self.right = pressed,  // Swapped: A now moves right
-            KeyCode::KeyD => self.left = pressed,   // Swapped: D now moves left
+            KeyCode::KeyA => self.left = pressed,   // Normal: A moves left
+            KeyCode::KeyD => self.right = pressed,  // Normal: D moves right
             KeyCode::Space => self.up = pressed,
             KeyCode::ShiftLeft => self.down = pressed,
             _ => {}
@@ -62,7 +62,7 @@ impl CameraController {
             return;
         }
 
-        self.yaw -= (delta_x as f32) * self.mouse_sensitivity;
+        self.yaw -= (delta_x as f32) * self.mouse_sensitivity;  // Reverted back to -= (mouse was fine)
         self.pitch -= (delta_y as f32) * self.mouse_sensitivity;
 
         // Clamp pitch to prevent gimbal lock
@@ -70,12 +70,14 @@ impl CameraController {
     }
 
     fn update(&mut self, dt: f32) -> (Vec3, Quat) {
-        let forward = Vec3::new(
-            self.yaw.cos() * self.pitch.cos(),
-            self.pitch.sin(),
-            self.yaw.sin() * self.pitch.cos(),
-        ).normalize();
-        let right = Vec3::new(self.yaw.sin(), 0.0, -self.yaw.cos()).normalize();
+        // Create rotation from yaw/pitch
+        let rotation = Quat::from_euler(glam::EulerRot::YXZ, self.yaw, self.pitch, 0.0);
+
+        // Calculate forward and right from rotation (matching Stratum Camera)
+        // For movement, ignore pitch by using only yaw rotation
+        let horizontal_rotation = Quat::from_rotation_y(self.yaw);
+        let forward = (horizontal_rotation * Vec3::NEG_Z).normalize();
+        let right = (horizontal_rotation * Vec3::X).normalize();
 
         let mut velocity = Vec3::ZERO;
         if self.forward {
@@ -102,7 +104,6 @@ impl CameraController {
             self.position += velocity;
         }
 
-        let rotation = Quat::from_euler(glam::EulerRot::YXZ, self.yaw, self.pitch, 0.0);
         (self.position, rotation)
     }
 }
@@ -204,6 +205,12 @@ fn main() {
     // Create camera
     let mut camera_controller = CameraController::new(Vec3::new(0.0, 50.0, 0.0));
     let camera_id = world.register_camera(camera_controller.position, Quat::IDENTITY);
+
+    // Set camera projection parameters
+    if let Some(camera) = world.registry.get_camera_mut(camera_id) {
+        let aspect = size.width as f32 / size.height as f32;
+        camera.set_projection(70.0_f32.to_radians(), aspect, 0.1, 1000.0);
+    }
 
     let mut last_frame = Instant::now();
     let mut frame_count = 0u64;
