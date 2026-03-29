@@ -142,62 +142,42 @@ pub struct Frustum {
 
 impl Frustum {
     /// Create a frustum from a view-projection matrix.
+    /// Extracts the 6 frustum planes from a column-major view-projection matrix.
     pub fn from_matrix(view_proj: glam::Mat4) -> Self {
         let mut planes = [Vec4::ZERO; 6];
 
-        // Extract frustum planes from view-projection matrix
-        // Left plane
-        planes[0] = Vec4::new(
-            view_proj.w_axis.x + view_proj.x_axis.x,
-            view_proj.w_axis.y + view_proj.x_axis.y,
-            view_proj.w_axis.z + view_proj.x_axis.z,
-            view_proj.w_axis.w + view_proj.x_axis.w,
-        );
+        // For glam's column-major matrices, we need to extract rows
+        // glam provides row(index) method which gives us the i-th row
+        let row0 = view_proj.row(0);
+        let row1 = view_proj.row(1);
+        let row2 = view_proj.row(2);
+        let row3 = view_proj.row(3);
 
-        // Right plane
-        planes[1] = Vec4::new(
-            view_proj.w_axis.x - view_proj.x_axis.x,
-            view_proj.w_axis.y - view_proj.x_axis.y,
-            view_proj.w_axis.z - view_proj.x_axis.z,
-            view_proj.w_axis.w - view_proj.x_axis.w,
-        );
+        // Extract frustum planes using Gribb-Hartmann method
+        // Left plane: row3 + row0
+        planes[0] = row3 + row0;
 
-        // Bottom plane
-        planes[2] = Vec4::new(
-            view_proj.w_axis.x + view_proj.y_axis.x,
-            view_proj.w_axis.y + view_proj.y_axis.y,
-            view_proj.w_axis.z + view_proj.y_axis.z,
-            view_proj.w_axis.w + view_proj.y_axis.w,
-        );
+        // Right plane: row3 - row0
+        planes[1] = row3 - row0;
 
-        // Top plane
-        planes[3] = Vec4::new(
-            view_proj.w_axis.x - view_proj.y_axis.x,
-            view_proj.w_axis.y - view_proj.y_axis.y,
-            view_proj.w_axis.z - view_proj.y_axis.z,
-            view_proj.w_axis.w - view_proj.y_axis.w,
-        );
+        // Bottom plane: row3 + row1
+        planes[2] = row3 + row1;
 
-        // Near plane
-        planes[4] = Vec4::new(
-            view_proj.w_axis.x + view_proj.z_axis.x,
-            view_proj.w_axis.y + view_proj.z_axis.y,
-            view_proj.w_axis.z + view_proj.z_axis.z,
-            view_proj.w_axis.w + view_proj.z_axis.w,
-        );
+        // Top plane: row3 - row1
+        planes[3] = row3 - row1;
 
-        // Far plane
-        planes[5] = Vec4::new(
-            view_proj.w_axis.x - view_proj.z_axis.x,
-            view_proj.w_axis.y - view_proj.z_axis.y,
-            view_proj.w_axis.z - view_proj.z_axis.z,
-            view_proj.w_axis.w - view_proj.z_axis.w,
-        );
+        // Near plane: row3 + row2
+        planes[4] = row3 + row2;
 
-        // Normalize planes
+        // Far plane: row3 - row2
+        planes[5] = row3 - row2;
+
+        // Normalize planes (divide by length of normal vector)
         for plane in &mut planes {
             let length = Vec3::new(plane.x, plane.y, plane.z).length();
-            *plane /= length;
+            if length > 0.0 {
+                *plane /= length;
+            }
         }
 
         Self { planes }
