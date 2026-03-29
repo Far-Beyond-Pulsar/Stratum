@@ -1,12 +1,28 @@
 [package]
-name        = "stratum"
-version     = "0.1.7"
-edition     = "2021"
-description = "World orchestration layer for the Pulsar engine — levels, spatial streaming, cameras, render views."
+name = "stratum"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.70"
+description = "World partition streaming and management system"
+license = "MIT OR Apache-2.0"
 
 [dependencies]
-glam       = { workspace = true }
-log        = { workspace = true }
-thiserror  = { workspace = true }
-serde      = { workspace = true }
+glam = { workspace = true }
+bytemuck = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }
+
+# Async runtime for background IO
+tokio = { version = "1", features = ["rt", "sync", "fs", "io-util", "macros"] }
+
+# Compression for chunk storage
+lz4 = "1.24"
+
+# Fast hashing
+ahash = "0.8"
+
+[dev-dependencies]
+env_logger = { workspace = true }
+pollster = { workspace = true }

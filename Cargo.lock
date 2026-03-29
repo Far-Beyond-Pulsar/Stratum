@@ -740,7 +740,7 @@ dependencies = [
 
 [[package]]
 name = "helio"
-version = "0.3.0"
+version = "0.4.1"
 dependencies = [
  "arrayvec",
  "bytemuck",
@@ -752,6 +752,7 @@ dependencies = [
  "helio-pass-fxaa",
  "helio-pass-gbuffer",
  "helio-pass-hiz",
+ "helio-pass-hlfs",
  "helio-pass-light-cull",
  "helio-pass-occlusion-cull",
  "helio-pass-shadow",
@@ -768,6 +769,8 @@ dependencies = [
  "image",
  "libhelio",
  "log",
+ "pollster",
+ "quark",
  "thiserror 2.0.18",
  "wgpu",
 ]
@@ -840,6 +843,17 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helio-v3",
+ "wgpu",
+]
+
+[[package]]
+name = "helio-pass-hlfs"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "glam",
+ "helio-v3",
+ "libhelio",
  "wgpu",
 ]
 
@@ -1752,6 +1766,25 @@ name = "pxfm"
 version = "0.1.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b5a041e753da8b807c9255f28de81879c78c876392ff2469cde94799b2896b9d"
+
+[[package]]
+name = "quark"
+version = "0.1.0"
+source = "git+https://github.com/Far-Beyond-Pulsar/Quark#8ed5c18ec1a02cf1b20ee34b9cec22b773dac136"
+dependencies = [
+ "quark-macros",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "quark-macros"
+version = "0.1.0"
+source = "git+https://github.com/Far-Beyond-Pulsar/Quark#8ed5c18ec1a02cf1b20ee34b9cec22b773dac136"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
 
 [[package]]
 name = "quick-xml"

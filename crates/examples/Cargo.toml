@@ -1,33 +1,20 @@
 [package]
-name    = "examples"
+name = "stratum-examples"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.70"
+publish = false
 
-[[example]]
-name = "stratum_basic"
-path = "stratum_basic.rs"
-
-[[example]]
-name = "stratum_advanced"
-path = "stratum_advanced.rs"
-
-[[example]]
-name = "level_fs"
-path = "level_fs.rs"
-
-[[example]]
-name = "voxel_world"
-path = "voxel_world/main.rs"
+[[bin]]
+name = "basic_world"
+path = "src/basic_world.rs"
 
 [dependencies]
-stratum         = { workspace = true }
-stratum-helio   = { workspace = true }
-helio           = { workspace = true }
-wgpu            = { workspace = true }
-glam            = { workspace = true }
-winit           = { workspace = true }
-env_logger      = { workspace = true }
-log             = { workspace = true }
-pollster        = { workspace = true }
-image           = { workspace = true }
-bytemuck        = { workspace = true }
+stratum = { workspace = true }
+stratum-helio = { workspace = true }
+helio = { workspace = true }
+glam = { workspace = true }
+winit = { workspace = true }
+pollster = { workspace = true }
+env_logger = { workspace = true }
+log = { workspace = true }

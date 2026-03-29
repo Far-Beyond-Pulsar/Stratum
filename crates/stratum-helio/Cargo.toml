@@ -1,14 +1,15 @@
 [package]
-name        = "stratum-helio"
-version     = "0.1.0"
-edition     = "2021"
-description = "Integration bridge between Stratum (world layer) and Helio (renderer)."
+name = "stratum-helio"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.70"
+description = "Helio integration for Stratum world partition system"
+license = "MIT OR Apache-2.0"
 
 [dependencies]
-stratum         = { workspace = true }
-helio           = { workspace = true }
-# wgpu must use the exact same fork+rev as helio-render-v2 to avoid type mismatches.
-wgpu            = { workspace = true }
-glam            = { workspace = true }
-log             = { workspace = true }
-bytemuck         = "1.13.1"
+stratum = { workspace = true }
+helio = { workspace = true }
+glam = { workspace = true }
+log = { workspace = true }
+thiserror = { workspace = true }
+ahash = "0.8"
