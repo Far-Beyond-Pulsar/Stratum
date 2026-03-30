@@ -1,10 +1,17 @@
-use helio::{Camera, Renderer, RendererConfig, required_wgpu_features, required_wgpu_limits, GpuLight, SceneActor};
+use helio::{Camera, Renderer, RendererConfig, required_wgpu_features, required_wgpu_limits, GpuLight, SceneActor, Scene};
 use stratum::{WorldPartitionManager, Camera as StratumCamera};
-use glam::{Vec3, Mat4};
+use glam::Vec3;
 use std::sync::Arc;
 
+// Re-export Helio types for convenience
+pub use helio::{
+    MeshUpload, PackedVertex, MeshId, MaterialId, ObjectId, TextureId,
+    MaterialAsset, TextureUpload, ObjectDescriptor, SceneResult,
+    GpuMaterial, LightType, SceneActorId, GroupMask,
+};
+
 /// Wrapper that integrates Helio renderer with Stratum world partition.
-/// This hides all Helio details from the user.
+/// Exposes the Helio scene for user customization while managing the rendering loop.
 pub struct StratumRenderer {
     renderer: Renderer,
     device: Arc<wgpu::Device>,
@@ -212,5 +219,35 @@ impl StratumRenderer {
     /// Get required WGPU limits for Helio.
     pub fn required_limits(available: wgpu::Limits) -> wgpu::Limits {
         required_wgpu_limits(available)
+    }
+
+    /// Get mutable access to the Helio Scene for adding meshes, materials, and objects.
+    pub fn scene_mut(&mut self) -> &mut Scene {
+        self.renderer.scene_mut()
+    }
+
+    /// Get read-only access to the Helio Scene.
+    pub fn scene(&self) -> &Scene {
+        self.renderer.scene()
+    }
+
+    /// Get mutable access to the underlying Helio Renderer.
+    pub fn renderer_mut(&mut self) -> &mut Renderer {
+        &mut self.renderer
+    }
+
+    /// Get read-only access to the underlying Helio Renderer.
+    pub fn renderer(&self) -> &Renderer {
+        &self.renderer
+    }
+
+    /// Get the WGPU device for mesh uploads.
+    pub fn device(&self) -> &Arc<wgpu::Device> {
+        &self.device
+    }
+
+    /// Get the WGPU queue for mesh uploads.
+    pub fn queue(&self) -> &Arc<wgpu::Queue> {
+        &self.queue
     }
 }

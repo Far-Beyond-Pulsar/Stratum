@@ -15,4 +15,13 @@ pub mod renderer;
 
 pub use bridge::{stratum_camera_to_external, StratumHelioAdapter, GroupId, AdapterStats};
 pub use asset_registry::{AssetRegistry, MeshHandle, MaterialHandle, TextureHandle, ObjectHandle};
-pub use renderer::StratumRenderer;
+pub use renderer::{
+    StratumRenderer,
+    // Re-export Helio types for user convenience
+    MeshUpload, PackedVertex, MeshId, MaterialId, ObjectId, TextureId,
+    MaterialAsset, TextureUpload, ObjectDescriptor, SceneResult,
+    GpuMaterial, LightType, SceneActorId, GroupMask,
+};
+
+// Re-export SceneActor separately since it's used in the renderer
+pub use helio::SceneActor;

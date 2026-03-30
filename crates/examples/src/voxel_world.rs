@@ -22,8 +22,12 @@ mod voxel_world {
 use voxel_world::*;
 
 use stratum::{ChunkMetadata, WorldPartitionManager};
-use stratum_helio::StratumRenderer;
-use glam::{Quat, Vec3};
+use stratum_helio::{
+    StratumRenderer, MeshUpload, PackedVertex, MeshId, MaterialId, ObjectId,
+    ObjectDescriptor, SceneActor, GpuMaterial, SceneActorId,
+};
+use helio::GroupMask;
+use glam::{Quat, Vec3, Mat4};
 use winit::{
     event::*,
     event_loop::EventLoop,
@@ -147,6 +151,162 @@ impl VoxelChunkGenerator {
     }
 }
 
+/// Manages voxel chunk meshes in the Helio scene.
+struct VoxelChunkMeshManager {
+    /// Map of chunk coords to (MeshId, ObjectId).
+    chunk_objects: HashMap<(i32, i32, i32), (MeshId, ObjectId)>,
+    /// Default material for voxels.
+    material_id: MaterialId,
+}
+
+impl VoxelChunkMeshManager {
+    fn new(renderer: &mut StratumRenderer) -> Self {
+        // Create a simple white material for voxels (stone-like appearance)
+        let material = GpuMaterial {
+            base_color: [0.7, 0.7, 0.7, 1.0],  // Light gray
+            emissive: [0.0, 0.0, 0.0, 0.0],
+            roughness_metallic: [0.9, 0.0, 1.5, 0.5],  // Very rough, non-metallic
+            tex_base_color: GpuMaterial::NO_TEXTURE,
+            tex_normal: GpuMaterial::NO_TEXTURE,
+            tex_roughness: GpuMaterial::NO_TEXTURE,
+            tex_emissive: GpuMaterial::NO_TEXTURE,
+            tex_occlusion: GpuMaterial::NO_TEXTURE,
+            workflow: 0,
+            flags: 0,
+            _pad: 0,
+        };
+
+        let material_id = renderer.scene_mut().insert_material(material);
+
+        Self {
+            chunk_objects: HashMap::new(),
+            material_id,
+        }
+    }
+
+    fn sync_chunks(
+        &mut self,
+        renderer: &mut StratumRenderer,
+        voxel_generator: &mut VoxelChunkGenerator,
+        world: &WorldPartitionManager,
+    ) {
+        // Get currently visible chunks
+        let visible_coords: std::collections::HashSet<(i32, i32, i32)> = world
+            .chunks
+            .iter()
+            .filter(|(_, chunk)| chunk.is_visible())
+            .map(|(id, _)| {
+                let (x, y, z, _) = id.to_coords();
+                (x, y, z)
+            })
+            .collect();
+
+        // Remove objects for chunks that are no longer visible
+        let to_remove: Vec<(i32, i32, i32)> = self
+            .chunk_objects
+            .keys()
+            .filter(|coord| !visible_coords.contains(coord))
+            .copied()
+            .collect();
+
+        for coord in to_remove {
+            if let Some((_mesh_id, object_id)) = self.chunk_objects.remove(&coord) {
+                renderer.scene_mut().remove_object(object_id);
+            }
+        }
+
+        // Add objects for newly visible chunks
+        for &coord in &visible_coords {
+            if !self.chunk_objects.contains_key(&coord) {
+                self.add_chunk_mesh(renderer, voxel_generator, coord);
+            }
+        }
+    }
+
+    fn add_chunk_mesh(
+        &mut self,
+        renderer: &mut StratumRenderer,
+        voxel_generator: &mut VoxelChunkGenerator,
+        (chunk_x, chunk_y, chunk_z): (i32, i32, i32),
+    ) {
+        // Generate voxel chunk data
+        let voxel_chunk = voxel_generator.get_or_generate(chunk_x, chunk_y, chunk_z);
+
+        // Generate face-culled mesh
+        let (voxel_vertices, indices) = meshing::generate_chunk_mesh(voxel_chunk);
+
+        // Skip empty chunks
+        if voxel_vertices.is_empty() {
+            return;
+        }
+
+        // Convert to PackedVertex format for Helio
+        let vertices: Vec<PackedVertex> = voxel_vertices
+            .iter()
+            .map(|v| {
+                // Calculate tangent from normal (simple approach for voxels)
+                let tangent = if v.normal[1].abs() > 0.9 {
+                    // For up/down faces, use X as tangent
+                    [1.0, 0.0, 0.0]
+                } else {
+                    // For other faces, use Y as tangent
+                    [0.0, 1.0, 0.0]
+                };
+
+                PackedVertex::from_components(
+                    v.position,
+                    v.normal,
+                    v.uv,
+                    tangent,
+                    1.0, // bitangent sign
+                )
+            })
+            .collect();
+
+        // Upload mesh to Helio using SceneActor
+        let mesh_upload = MeshUpload {
+            vertices,
+            indices,
+        };
+
+        let mesh_id = renderer.scene_mut()
+            .insert_actor(SceneActor::mesh(mesh_upload))
+            .as_mesh()
+            .expect("Failed to insert mesh actor");
+
+        // Create transform for chunk (position at chunk origin)
+        let chunk_pos = Vec3::new(
+            chunk_x as f32 * voxel_chunk::CHUNK_SIZE as f32,
+            chunk_y as f32 * voxel_chunk::CHUNK_SIZE as f32,
+            chunk_z as f32 * voxel_chunk::CHUNK_SIZE as f32,
+        );
+        let transform = Mat4::from_translation(chunk_pos);
+
+        // Calculate bounding sphere radius for chunk (diagonal of cube)
+        let chunk_size = voxel_chunk::CHUNK_SIZE as f32;
+        let radius = (chunk_size * chunk_size * 3.0).sqrt() * 0.5;
+
+        // Create object in scene using SceneActor
+        let object_desc = ObjectDescriptor {
+            mesh: mesh_id,
+            material: self.material_id,
+            transform,
+            bounds: [chunk_pos.x, chunk_pos.y, chunk_pos.z, radius],
+            flags: 0,
+            groups: helio::GroupMask::NONE,
+        };
+
+        let object_id = renderer.scene_mut()
+            .insert_actor(SceneActor::object(object_desc))
+            .as_object()
+            .expect("Failed to insert object actor");
+
+        self.chunk_objects.insert((chunk_x, chunk_y, chunk_z), (mesh_id, object_id));
+        log::debug!("Added mesh for chunk ({}, {}, {}) with {} vertices",
+            chunk_x, chunk_y, chunk_z, voxel_vertices.len());
+    }
+}
+
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
@@ -218,6 +378,9 @@ fn main() {
 
     // Create voxel chunk generator
     let mut voxel_generator = VoxelChunkGenerator::new();
+
+    // Create voxel chunk mesh manager
+    let mut mesh_manager = VoxelChunkMeshManager::new(&mut renderer);
 
     // Generate chunks in a grid around spawn
     log::info!("Generating initial chunk grid...");
@@ -306,6 +469,9 @@ fn main() {
 
                         // Update world partition system
                         world.tick(dt);
+
+                        // Sync voxel meshes with visible chunks
+                        mesh_manager.sync_chunks(&mut renderer, &mut voxel_generator, &world);
 
                         // Render frame
                         let frame = match surface.get_current_texture() {
