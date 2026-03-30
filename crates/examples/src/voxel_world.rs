@@ -303,9 +303,11 @@ impl VoxelChunkMeshManager {
         );
         let transform = Mat4::from_translation(chunk_pos);
 
-        // Bounding sphere center is at chunk center
+        // Bounding sphere: center in WORLD space (chunk center), radius to corner
+        // Helio examples use world space bounds (transform.w_axis = translation)
         let half_size = chunk_size * 0.5;
-        let radius = (chunk_size * chunk_size * 3.0).sqrt() * 0.5;
+        let radius = half_size * 1.732051; // sqrt(3) for cube diagonal
+        let world_center = chunk_pos + Vec3::splat(half_size);
 
         // Create object in scene using SceneActor
         let object_desc = ObjectDescriptor {
@@ -313,9 +315,9 @@ impl VoxelChunkMeshManager {
             material: self.material_id,
             transform,
             bounds: [
-                chunk_pos.x + half_size,
-                chunk_pos.y + half_size,
-                chunk_pos.z + half_size,
+                world_center.x,  // WORLD space center (matching Helio examples)
+                world_center.y,
+                world_center.z,
                 radius
             ],
             flags: 0,
@@ -328,8 +330,8 @@ impl VoxelChunkMeshManager {
             .expect("Failed to insert object actor");
 
         self.chunk_objects.insert((chunk_x, chunk_y, chunk_z), (mesh_id, object_id));
-        log::debug!("Added mesh for chunk ({}, {}, {}) with {} vertices",
-            chunk_x, chunk_y, chunk_z, voxel_vertices.len());
+        log::info!("Created object {:?} for chunk ({}, {}, {}) - total objects: {}",
+            object_id, chunk_x, chunk_y, chunk_z, self.chunk_objects.len());
     }
 }
 
