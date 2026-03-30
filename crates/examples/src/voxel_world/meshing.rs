@@ -1,8 +1,8 @@
-//! Face-culled voxel mesh generation.
+//! Simple cube-based meshing for voxel chunks.
+//! Generates meshes from (0,0,0) to (16,16,16) in local space.
 
 use super::blocks::Block;
 use super::voxel_chunk::{VoxelChunk, CHUNK_SIZE};
-use glam::Vec3;
 
 /// Vertex data for a voxel face.
 #[derive(Clone, Copy, Debug)]
@@ -13,89 +13,74 @@ pub struct VoxelVertex {
     pub material_id: u32,
 }
 
-/// Face direction for culling.
-#[derive(Clone, Copy, Debug)]
-enum Face {
-    PosX, // Right
-    NegX, // Left
-    PosY, // Top
-    NegY, // Bottom
-    PosZ, // Front
-    NegZ, // Back
-}
+/// Standard cube face vertices.
+/// Returns 4 vertices in the order: [v0, v1, v2, v3] for indices [0,1,2,0,2,3]
+fn get_cube_face_vertices(face_index: usize, pos: [f32; 3], size: f32) -> [[f32; 3]; 4] {
+    let half = size * 0.5;
+    let [x, y, z] = pos;
 
-impl Face {
-    fn normal(self) -> [f32; 3] {
-        match self {
-            Face::PosX => [1.0, 0.0, 0.0],
-            Face::NegX => [-1.0, 0.0, 0.0],
-            Face::PosY => [0.0, 1.0, 0.0],
-            Face::NegY => [0.0, -1.0, 0.0],
-            Face::PosZ => [0.0, 0.0, 1.0],
-            Face::NegZ => [0.0, 0.0, -1.0],
+    match face_index {
+        0 => {
+            // +X face (right) - normal points in +X direction
+            // Bottom-left, bottom-right, top-right, top-left (CCW from outside)
+            [[x + half, y - half, z - half],  // 0: bottom-near
+             [x + half, y - half, z + half],  // 1: bottom-far
+             [x + half, y + half, z + half],  // 2: top-far
+             [x + half, y + half, z - half]]  // 3: top-near
         }
-    }
-
-    /// Get vertices for this face (4 corners, counter-clockwise when looking at face).
-    fn vertices(self, x: f32, y: f32, z: f32) -> [[f32; 3]; 4] {
-        match self {
-            Face::PosX => [
-                // Right face (+X)
-                [x + 1.0, y, z],
-                [x + 1.0, y + 1.0, z],
-                [x + 1.0, y + 1.0, z + 1.0],
-                [x + 1.0, y, z + 1.0],
-            ],
-            Face::NegX => [
-                // Left face (-X)
-                [x, y, z + 1.0],
-                [x, y + 1.0, z + 1.0],
-                [x, y + 1.0, z],
-                [x, y, z],
-            ],
-            Face::PosY => [
-                // Top face (+Y)
-                [x, y + 1.0, z],
-                [x, y + 1.0, z + 1.0],
-                [x + 1.0, y + 1.0, z + 1.0],
-                [x + 1.0, y + 1.0, z],
-            ],
-            Face::NegY => [
-                // Bottom face (-Y)
-                [x, y, z],
-                [x + 1.0, y, z],
-                [x + 1.0, y, z + 1.0],
-                [x, y, z + 1.0],
-            ],
-            Face::PosZ => [
-                // Front face (+Z)
-                [x, y, z + 1.0],
-                [x, y + 1.0, z + 1.0],
-                [x + 1.0, y + 1.0, z + 1.0],
-                [x + 1.0, y, z + 1.0],
-            ],
-            Face::NegZ => [
-                // Back face (-Z)
-                [x + 1.0, y, z],
-                [x + 1.0, y + 1.0, z],
-                [x, y + 1.0, z],
-                [x, y, z],
-            ],
+        1 => {
+            // -X face (left) - normal points in -X direction
+            [[x - half, y - half, z + half],  // 0: bottom-far (from -X view, this is near)
+             [x - half, y - half, z - half],  // 1: bottom-near (from -X view, this is far)
+             [x - half, y + half, z - half],  // 2: top-near
+             [x - half, y + half, z + half]]  // 3: top-far
         }
-    }
-
-    /// UV coordinates for this face (same for all faces).
-    fn uvs(self) -> [[f32; 2]; 4] {
-        [
-            [0.0, 1.0], // Bottom-left
-            [0.0, 0.0], // Top-left
-            [1.0, 0.0], // Top-right
-            [1.0, 1.0], // Bottom-right
-        ]
+        2 => {
+            // +Y face (top) - normal points in +Y direction
+            [[x - half, y + half, z - half],  // 0: near-left
+             [x + half, y + half, z - half],  // 1: near-right
+             [x + half, y + half, z + half],  // 2: far-right
+             [x - half, y + half, z + half]]  // 3: far-left
+        }
+        3 => {
+            // -Y face (bottom) - normal points in -Y direction
+            [[x - half, y - half, z - half],  // 0
+             [x - half, y - half, z + half],  // 1
+             [x + half, y - half, z + half],  // 2
+             [x + half, y - half, z - half]]  // 3
+        }
+        4 => {
+            // +Z face (front) - normal points in +Z direction
+            [[x - half, y - half, z + half],  // 0: bottom-left
+             [x + half, y - half, z + half],  // 1: bottom-right
+             [x + half, y + half, z + half],  // 2: top-right
+             [x - half, y + half, z + half]]  // 3: top-left
+        }
+        5 => {
+            // -Z face (back) - normal points in -Z direction
+            [[x + half, y - half, z - half],  // 0
+             [x - half, y - half, z - half],  // 1
+             [x - half, y + half, z - half],  // 2
+             [x + half, y + half, z - half]]  // 3
+        }
+        _ => unreachable!(),
     }
 }
 
-/// Generate a face-culled mesh for a voxel chunk.
+fn get_cube_face_normal(face_index: usize) -> [f32; 3] {
+    match face_index {
+        0 => [1.0, 0.0, 0.0],   // +X
+        1 => [-1.0, 0.0, 0.0],  // -X
+        2 => [0.0, 1.0, 0.0],   // +Y
+        3 => [0.0, -1.0, 0.0],  // -Y
+        4 => [0.0, 0.0, 1.0],   // +Z
+        5 => [0.0, 0.0, -1.0],  // -Z
+        _ => unreachable!(),
+    }
+}
+
+/// Generate a cube mesh for the chunk.
+/// Chunk spans from (0,0,0) to (16,16,16) in local space.
 /// Returns (vertices, indices).
 pub fn generate_chunk_mesh(chunk: &VoxelChunk) -> (Vec<VoxelVertex>, Vec<u32>) {
     let mut vertices = Vec::new();
@@ -113,26 +98,32 @@ pub fn generate_chunk_mesh(chunk: &VoxelChunk) -> (Vec<VoxelVertex>, Vec<u32>) {
 
                 let material_id = block as u32;
 
-                // Check each face for occlusion
-                let faces_to_draw = [
-                    (Face::PosX, chunk.get(x + 1, y, z)),
-                    (Face::NegX, if x > 0 { chunk.get(x - 1, y, z) } else { Block::Air }),
-                    (Face::PosY, chunk.get(x, y + 1, z)),
-                    (Face::NegY, if y > 0 { chunk.get(x, y - 1, z) } else { Block::Air }),
-                    (Face::PosZ, chunk.get(x, y, z + 1)),
-                    (Face::NegZ, if z > 0 { chunk.get(x, y, z - 1) } else { Block::Air }),
+                // Position in chunk local space (0-16 range)
+                let local_pos = [
+                    x as f32 + 0.5,
+                    y as f32 + 0.5,
+                    z as f32 + 0.5,
                 ];
 
-                for (face, neighbor) in faces_to_draw {
-                    // Draw face if neighbor is transparent or air
-                    if neighbor.is_transparent() || neighbor.is_air() {
-                        add_face(
+                // Check each face for culling (6 faces)
+                for face_idx in 0..6 {
+                    let should_draw = match face_idx {
+                        0 => chunk.get(x + 1, y, z).is_transparent() || chunk.get(x + 1, y, z).is_air(), // +X
+                        1 => if x > 0 { chunk.get(x - 1, y, z).is_transparent() || chunk.get(x - 1, y, z).is_air() } else { true }, // -X
+                        2 => chunk.get(x, y + 1, z).is_transparent() || chunk.get(x, y + 1, z).is_air(), // +Y
+                        3 => if y > 0 { chunk.get(x, y - 1, z).is_transparent() || chunk.get(x, y - 1, z).is_air() } else { true }, // -Y
+                        4 => chunk.get(x, y, z + 1).is_transparent() || chunk.get(x, y, z + 1).is_air(), // +Z
+                        5 => if z > 0 { chunk.get(x, y, z - 1).is_transparent() || chunk.get(x, y, z - 1).is_air() } else { true }, // -Z
+                        _ => unreachable!(),
+                    };
+
+                    if should_draw {
+                        add_cube_face(
                             &mut vertices,
                             &mut indices,
-                            face,
-                            x as f32,
-                            y as f32,
-                            z as f32,
+                            face_idx,
+                            local_pos,
+                            1.0,
                             material_id,
                         );
                     }
@@ -144,20 +135,26 @@ pub fn generate_chunk_mesh(chunk: &VoxelChunk) -> (Vec<VoxelVertex>, Vec<u32>) {
     (vertices, indices)
 }
 
-/// Add a single face to the mesh.
-fn add_face(
+/// Add a single cube face to the mesh.
+fn add_cube_face(
     vertices: &mut Vec<VoxelVertex>,
     indices: &mut Vec<u32>,
-    face: Face,
-    x: f32,
-    y: f32,
-    z: f32,
+    face_index: usize,
+    pos: [f32; 3],
+    size: f32,
     material_id: u32,
 ) {
     let base_index = vertices.len() as u32;
-    let positions = face.vertices(x, y, z);
-    let uvs = face.uvs();
-    let normal = face.normal();
+    let positions = get_cube_face_vertices(face_index, pos, size);
+    let normal = get_cube_face_normal(face_index);
+
+    // UV coordinates (same for all faces)
+    let uvs = [
+        [0.0, 1.0], // Bottom-left
+        [1.0, 1.0], // Bottom-right
+        [1.0, 0.0], // Top-right
+        [0.0, 0.0], // Top-left
+    ];
 
     // Add 4 vertices for this quad
     for i in 0..4 {
@@ -169,7 +166,7 @@ fn add_face(
         });
     }
 
-    // Add 6 indices for 2 triangles (quad)
+    // Add 6 indices for 2 triangles (counter-clockwise)
     indices.extend_from_slice(&[
         base_index,
         base_index + 1,

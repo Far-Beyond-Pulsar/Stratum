@@ -212,14 +212,31 @@ impl VoxelChunkMeshManager {
         for coord in to_remove {
             if let Some((_mesh_id, object_id)) = self.chunk_objects.remove(&coord) {
                 renderer.scene_mut().remove_object(object_id);
+                log::debug!("Removed mesh for chunk {:?}", coord);
             }
         }
 
         // Add objects for newly visible chunks
+        let mut added_count = 0;
+        let mut skipped_empty = 0;
+
         for &coord in &visible_coords {
             if !self.chunk_objects.contains_key(&coord) {
+                let before_count = self.chunk_objects.len();
                 self.add_chunk_mesh(renderer, voxel_generator, coord);
+                let after_count = self.chunk_objects.len();
+
+                if after_count > before_count {
+                    added_count += 1;
+                } else {
+                    skipped_empty += 1;
+                }
             }
+        }
+
+        if added_count > 0 || skipped_empty > 0 {
+            log::info!("Chunk sync: {} visible, {} with meshes, {} added, {} skipped (empty)",
+                visible_coords.len(), self.chunk_objects.len(), added_count, skipped_empty);
         }
     }
 
@@ -237,6 +254,7 @@ impl VoxelChunkMeshManager {
 
         // Skip empty chunks
         if voxel_vertices.is_empty() {
+            log::debug!("Chunk ({}, {}, {}) is empty, skipping mesh generation", chunk_x, chunk_y, chunk_z);
             return;
         }
 
@@ -274,16 +292,17 @@ impl VoxelChunkMeshManager {
             .as_mesh()
             .expect("Failed to insert mesh actor");
 
-        // Create transform for chunk (position at chunk origin)
+        // Transform places mesh at chunk corner (mesh goes from 0-16 in local space)
+        let chunk_size = voxel_chunk::CHUNK_SIZE as f32;
         let chunk_pos = Vec3::new(
-            chunk_x as f32 * voxel_chunk::CHUNK_SIZE as f32,
-            chunk_y as f32 * voxel_chunk::CHUNK_SIZE as f32,
-            chunk_z as f32 * voxel_chunk::CHUNK_SIZE as f32,
+            chunk_x as f32 * chunk_size,
+            chunk_y as f32 * chunk_size,
+            chunk_z as f32 * chunk_size,
         );
         let transform = Mat4::from_translation(chunk_pos);
 
-        // Calculate bounding sphere radius for chunk (diagonal of cube)
-        let chunk_size = voxel_chunk::CHUNK_SIZE as f32;
+        // Bounding sphere center is at chunk center
+        let half_size = chunk_size * 0.5;
         let radius = (chunk_size * chunk_size * 3.0).sqrt() * 0.5;
 
         // Create object in scene using SceneActor
@@ -291,9 +310,14 @@ impl VoxelChunkMeshManager {
             mesh: mesh_id,
             material: self.material_id,
             transform,
-            bounds: [chunk_pos.x, chunk_pos.y, chunk_pos.z, radius],
+            bounds: [
+                chunk_pos.x + half_size,
+                chunk_pos.y + half_size,
+                chunk_pos.z + half_size,
+                radius
+            ],
             flags: 0,
-            groups: helio::GroupMask::NONE,
+            groups: GroupMask::NONE,
         };
 
         let object_id = renderer.scene_mut()

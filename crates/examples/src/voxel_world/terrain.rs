@@ -51,15 +51,22 @@ fn terrain_height(world_x: i32, world_z: i32) -> i32 {
     let x = world_x as f32;
     let z = world_z as f32;
 
-    // Multiple octaves of noise
-    let mut height = 0.0;
-    height += smooth_noise_2d(x * 0.01, z * 0.01) * 20.0; // Large features
-    height += smooth_noise_2d(x * 0.05, z * 0.05) * 8.0;  // Medium features
-    height += smooth_noise_2d(x * 0.1, z * 0.1) * 3.0;    // Small details
+    // Hills: multi-octave noise for gentle rolling terrain
+    let hills = smooth_noise_2d(x / 24.0, z / 24.0)
+              + smooth_noise_2d(x / 12.0, z / 12.0) * 0.5
+              + smooth_noise_2d(x / 6.0, z / 6.0) * 0.25;
+    let hills = (hills / 1.75).max(0.0).min(1.0);
 
-    // Base height at y=32
-    let base_height = 32;
-    (base_height as f32 + height) as i32
+    // Mountains: large-scale features
+    let mountain_raw = smooth_noise_2d(x / 88.0, z / 88.0)
+                     + smooth_noise_2d(x / 44.0, z / 44.0) * 0.5;
+    let mountain_raw = (mountain_raw / 1.5).max(0.0).min(1.0);
+    let mountain_factor = ((mountain_raw - 0.52) / 0.48).max(0.0).min(1.0);
+
+    // Base height: 8 + gentle hills (0-10) + mountains (0-30)
+    let base_height = 8;
+    let gentle_height = base_height + (hills * 10.0) as i32;
+    gentle_height + (mountain_factor * 30.0) as i32
 }
 
 /// Generate a voxel chunk at the given chunk coordinates.
@@ -86,34 +93,32 @@ pub fn generate_chunk(chunk_x: i32, chunk_y: i32, chunk_z: i32) -> VoxelChunk {
                     // Bedrock at the bottom
                     Block::Bedrock
                 } else if world_y < height - 3 {
-                    // Stone below surface
-                    if world_y < 20 && hash(world_x, world_y, world_z) % 100 < 2 {
-                        // Rare diamond ore
+                    // Stone below surface with ore veins
+                    if world_y <= 5 && hash(world_x, world_y, world_z) % 1000 < 3 {
                         Block::DiamondOre
-                    } else if world_y < 30 && hash(world_x, world_y, world_z) % 100 < 5 {
-                        // Gold ore
+                    } else if world_y <= 8 && hash(world_x, world_y, world_z) % 1000 < 6 {
                         Block::GoldOre
-                    } else if world_y < 40 && hash(world_x, world_y, world_z) % 100 < 10 {
-                        // Iron ore
+                    } else if world_y <= 15 && hash(world_x, world_y, world_z) % 1000 < 18 {
                         Block::IronOre
-                    } else if hash(world_x, world_y, world_z) % 100 < 15 {
-                        // Coal ore
+                    } else if world_y <= 20 && hash(world_x, world_y, world_z) % 1000 < 30 {
                         Block::CoalOre
+                    } else if hash(world_x, world_y, world_z) % 1000 < 20 {
+                        Block::Gravel
                     } else {
                         Block::Stone
                     }
                 } else if world_y < height - 1 {
-                    // Dirt layer
+                    // Dirt layer (2-3 blocks below surface)
                     Block::Dirt
                 } else if world_y == height - 1 {
-                    // Top layer - grass or snow depending on height
-                    if height > 50 {
+                    // Surface layer
+                    if height > 35 {
                         Block::Snow
                     } else {
                         Block::Grass
                     }
-                } else if world_y < 32 {
-                    // Water below sea level
+                } else if world_y < 10 {
+                    // Water level at y=10
                     Block::Water
                 } else {
                     // Air above surface
