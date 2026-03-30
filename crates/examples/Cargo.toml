@@ -9,6 +9,9 @@ publish = false
 name = "basic_world"
 path = "src/basic_world.rs"
 
+[[bin]]
+name = "voxel_world"
+path = "src/voxel_world.rs"
 
 [[bin]]
 name = "visual_world"
