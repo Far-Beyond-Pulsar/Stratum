@@ -4,7 +4,9 @@
       "Bash(dir:*)",
       "Bash(cargo build:*)",
       "Bash(cargo check:*)",
-      "Bash(crates/examples/Cargo.toml << 'EOF'\n[package]\nname = \"stratum-examples\"\nversion = \"0.1.0\"\nedition = \"2021\"\nrust-version = \"1.70\"\npublish = false\n\n[[bin]]\nname = \"basic_world\"\npath = \"src/basic_world.rs\"\n\n[dependencies]\nstratum = { workspace = true }\nstratum-helio = { workspace = true }\nglam = { workspace = true }\npollster = { workspace = true }\nenv_logger = { workspace = true }\nlog = { workspace = true }\nEOF)"
+      "Bash(crates/examples/Cargo.toml << 'EOF'\n[package]\nname = \"stratum-examples\"\nversion = \"0.1.0\"\nedition = \"2021\"\nrust-version = \"1.70\"\npublish = false\n\n[[bin]]\nname = \"basic_world\"\npath = \"src/basic_world.rs\"\n\n[dependencies]\nstratum = { workspace = true }\nstratum-helio = { workspace = true }\nglam = { workspace = true }\npollster = { workspace = true }\nenv_logger = { workspace = true }\nlog = { workspace = true }\nEOF)",
+      "Bash(timeout 5 cargo run:*)",
+      "Bash(timeout 3 cargo run:*)"
     ]
   }
 }

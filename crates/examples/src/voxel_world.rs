@@ -211,7 +211,7 @@ impl VoxelChunkMeshManager {
 
         for coord in to_remove {
             if let Some((_mesh_id, object_id)) = self.chunk_objects.remove(&coord) {
-                renderer.scene_mut().remove_object(object_id);
+                let _ = renderer.scene_mut().remove_object(object_id);
                 log::debug!("Removed mesh for chunk {:?}", coord);
             }
         }
@@ -254,9 +254,11 @@ impl VoxelChunkMeshManager {
 
         // Skip empty chunks
         if voxel_vertices.is_empty() {
-            log::debug!("Chunk ({}, {}, {}) is empty, skipping mesh generation", chunk_x, chunk_y, chunk_z);
             return;
         }
+
+        log::info!("Adding mesh for chunk ({}, {}, {}) with {} vertices",
+            chunk_x, chunk_y, chunk_z, voxel_vertices.len());
 
         // Convert to PackedVertex format for Helio
         let vertices: Vec<PackedVertex> = voxel_vertices

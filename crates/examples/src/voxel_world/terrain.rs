@@ -78,6 +78,16 @@ pub fn generate_chunk(chunk_x: i32, chunk_y: i32, chunk_z: i32) -> VoxelChunk {
     let world_y_base = chunk_y * CHUNK_SIZE as i32;
     let world_z_base = chunk_z * CHUNK_SIZE as i32;
 
+    // Sample terrain height at chunk center for debugging
+    let center_height = terrain_height(world_x_base + 8, world_z_base + 8);
+    let chunk_max_y = world_y_base + CHUNK_SIZE as i32 - 1;
+
+    // Debug log for y=0 chunks only
+    if chunk_y == 0 && (chunk_x.abs() <= 2 && chunk_z.abs() <= 2) {
+        log::info!("Generating chunk ({}, {}, {}) - terrain height at center: {}, chunk y-range: {}-{}",
+            chunk_x, chunk_y, chunk_z, center_height, world_y_base, chunk_max_y);
+    }
+
     for x in 0..CHUNK_SIZE {
         for z in 0..CHUNK_SIZE {
             let world_x = world_x_base + x as i32;
@@ -128,6 +138,12 @@ pub fn generate_chunk(chunk_x: i32, chunk_y: i32, chunk_z: i32) -> VoxelChunk {
                 chunk.set(x, y, z, block);
             }
         }
+    }
+
+    // Debug log block count for y=0 chunks near spawn
+    if chunk_y == 0 && (chunk_x.abs() <= 2 && chunk_z.abs() <= 2) {
+        let solid_count = chunk.count_solid_blocks();
+        log::info!("Chunk ({}, {}, {}) has {} solid blocks", chunk_x, chunk_y, chunk_z, solid_count);
     }
 
     chunk

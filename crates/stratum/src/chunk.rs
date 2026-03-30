@@ -27,7 +27,8 @@ impl ChunkMetadata {
 
         let grid_pos = Vec3::new(grid_x as f32, grid_y as f32, grid_z as f32);
         let half_size = chunk_size * 0.5;
-        let center = grid_pos * chunk_size;
+        // Center is at grid position + half chunk size (chunks are corner-aligned)
+        let center = grid_pos * chunk_size + Vec3::splat(half_size);
 
         let aabb = Aabb::from_center_extents(center, Vec3::splat(half_size));
 
